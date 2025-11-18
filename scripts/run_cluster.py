@@ -113,6 +113,12 @@ def parse_args() -> argparse.Namespace:
         help="Zero padding de l'index de split (ex: 00000)",
     )
     parser.add_argument(
+        "--frequency-step",
+        type=int,
+        default=100,
+        help="Taille des intervalles de frequence pour la phase de tri",
+    )
+    parser.add_argument(
         "--uv-bin",
         default=str(Path.home() / ".local/bin/uv"),
         help="Chemin vers l'exécutable uv (defaut: ~/.local/bin/uv)",
@@ -172,6 +178,8 @@ def main() -> int:
         str(num_workers),
         "--splits",
         str(args.splits),
+        "--frequency-step",
+        str(args.frequency_step),
     ]
     master_ssh = build_ssh_command(master_node, remote_root, master_cmd)
     try:

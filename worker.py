@@ -205,22 +205,19 @@ def wordcount_map_for_split(
     return dict(counts)
 
 
-def persist_results(
+def persist_wordcount_results(
     worker_id: str,
     splits: List[int],
-    final_counts: Dict[str, int],
+    counts: Dict[str, int],
     output_dir: str,
 ) -> Path:
-    """
-    Ecrit les resultats du wordcount et des indicateurs derives dans un fichier JSON.
-    """
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    total_words = sum(final_counts.values())
-    unique_words = len(final_counts)
+    total_words = sum(counts.values())
+    unique_words = len(counts)
     vocab_density = (unique_words / total_words) if total_words else 0.0
-    top_items = sorted(final_counts.items(), key=lambda kv: kv[1], reverse=True)[:20]
+    top_items = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:20]
 
     result = {
         "worker_id": worker_id,
@@ -229,10 +226,30 @@ def persist_results(
         "unique_words": unique_words,
         "vocab_density": vocab_density,
         "top_words": [{"word": k, "count": v} for k, v in top_items],
-        "counts": final_counts,
+        "counts": counts,
     }
 
     output_path = out_dir / f"{worker_id}_wordcount.json"
+    with output_path.open("w", encoding="utf-8") as fh:
+        json.dump(result, fh, ensure_ascii=False, indent=2)
+    return output_path
+
+
+def persist_sorted_results(
+    worker_id: str,
+    intervals: Tuple[int, int],
+    sorted_items: List[Tuple[str, int]],
+    output_dir: str,
+) -> Path:
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result = {
+        "worker_id": worker_id,
+        "interval": intervals,
+        "count": len(sorted_items),
+        "items": [{"word": w, "count": c} for w, c in sorted_items],
+    }
+    output_path = out_dir / f"{worker_id}_sorted.json"
     with output_path.open("w", encoding="utf-8") as fh:
         json.dump(result, fh, ensure_ascii=False, indent=2)
     return output_path
@@ -336,6 +353,10 @@ def run_map_shuffle_reduce(
     return dict(final_counts)
 
 
+def all_workers_done(state: Dict[str, int], nb_workers: int) -> bool:
+    return len(state) >= nb_workers
+
+
 def run_worker(
     worker_id: str,
     master_host: str,
@@ -360,27 +381,29 @@ def run_worker(
             },
         )
 
+        wordcounts: Dict[str, int] = {}
+        all_workers_meta: List[dict] = []
+
         while True:
             msg = recv_msg(sock)
             if msg is None:
                 break
             mtype = msg.get("type")
 
-            if mtype == "START_JOB":
+            if mtype == "START_WORDCOUNT":
                 splits = msg.get("splits") or []
-                all_workers = msg.get("all_workers") or []
-                if not isinstance(splits, list) or not isinstance(all_workers, list):
+                all_workers_meta = msg.get("all_workers") or []
+                if not isinstance(splits, list) or not isinstance(all_workers_meta, list):
                     continue
-
                 print(
-                    f"[worker {worker_id}] Debut du job "
-                    f"(splits assignes: {splits}, nb workers = {len(all_workers)})"
+                    f"[worker {worker_id}] Job 1/2 wordcount "
+                    f"(splits: {splits}, nb workers = {len(all_workers_meta)})"
                 )
                 split_ids = [int(s) for s in splits]
-                final_counts = run_map_shuffle_reduce(
+                wordcounts = run_map_shuffle_reduce(
                     worker_id=worker_id,
                     splits=split_ids,
-                    all_workers=all_workers,
+                    all_workers=all_workers_meta,
                     shuffle_host=shuffle_host,
                     shuffle_port=shuffle_port,
                     data_dir=data_dir,
@@ -389,19 +412,59 @@ def run_worker(
                     split_padding=split_padding,
                     map_threads=map_threads,
                 )
-                output_path = persist_results(
+                output_path = persist_wordcount_results(
                     worker_id=worker_id,
                     splits=split_ids,
-                    final_counts=final_counts,
+                    counts=wordcounts,
                     output_dir=output_dir,
                 )
+                min_freq = min(wordcounts.values()) if wordcounts else 0
+                max_freq = max(wordcounts.values()) if wordcounts else 0
+                send_msg(
+                    sock,
+                    {
+                        "type": "WORDCOUNT_DONE",
+                        "worker_id": worker_id,
+                        "num_keys": len(wordcounts),
+                        "min_freq": min_freq,
+                        "max_freq": max_freq,
+                    },
+                )
+                print(f"[worker {worker_id}] Wordcount OK ({len(wordcounts)} cles). {output_path}")
+
+            elif mtype == "START_SORT":
+                interval = msg.get("interval") or {}
+                min_freq = int(interval.get("min", 0))
+                max_freq = int(interval.get("max", 0))
                 print(
-                    f"[worker {worker_id}] Job termine, "
-                    f"{len(final_counts)} cles reduites. Resultats: {output_path}"
+                    f"[worker {worker_id}] Job 2/2 tri "
+                    f"(intervalle [{min_freq}, {max_freq}])"
+                )
+                sorted_items = sorted(
+                    [
+                        (w, c)
+                        for w, c in wordcounts.items()
+                        if min_freq <= c <= max_freq
+                    ],
+                    key=lambda kv: (-kv[1], kv[0]),
+                )
+                output_path = persist_sorted_results(
+                    worker_id=worker_id,
+                    intervals=(min_freq, max_freq),
+                    sorted_items=sorted_items,
+                    output_dir=output_dir,
                 )
                 send_msg(
                     sock,
-                    {"type": "JOB_DONE", "worker_id": worker_id, "num_keys": len(final_counts)},
+                    {
+                        "type": "SORT_DONE",
+                        "worker_id": worker_id,
+                        "count": len(sorted_items),
+                    },
+                )
+                print(
+                    f"[worker {worker_id}] Tri OK ({len(sorted_items)} elements) "
+                    f"-> {output_path}"
                 )
 
             elif mtype == "SHUTDOWN":
@@ -473,6 +536,6 @@ if __name__ == "__main__":
         file_prefix=args.file_prefix,
         file_suffix=args.file_suffix,
         split_padding=args.split_padding,
-        map_threads=max(1, os.cpu_count() or 1),
+        map_threads=1, #max(1, os.cpu_count() or 1),
         output_dir=args.output_dir,
     )

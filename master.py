@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple, Optional
 
 
 """
@@ -84,14 +84,18 @@ class WorkerState:
     host: str
     shuffle_port: int
     conn: socket.socket
-    done: bool = False
-    meta: dict = field(default_factory=dict)
+    wordcount_done: bool = False
+    sort_done: bool = False
+    interval: Optional[Tuple[int, int]] = None
+    min_freq: int = 0
+    max_freq: int = 0
 
 
 workers: Dict[str, WorkerState] = {}
 workers_lock = threading.Lock()
 all_registered = threading.Event()
 all_done = threading.Event()
+wordcount_done_event = threading.Event()
 job_start_time: float | None = None
 
 
@@ -128,16 +132,31 @@ def handle_worker(conn: socket.socket, addr, expected_workers: int) -> None:
                     if len(workers) >= expected_workers:
                         all_registered.set()
 
-            elif mtype == "JOB_DONE":
+            elif mtype == "WORDCOUNT_DONE":
                 wid = msg.get("worker_id")
                 if not isinstance(wid, str):
                     continue
                 with workers_lock:
                     w = workers.get(wid)
                     if w:
-                        w.done = True
-                        print(f"Worker {wid} a termine son job.")
-                    if workers and all(w.done for w in workers.values()):
+                        w.wordcount_done = True
+                        w.min_freq = int(msg.get("min_freq", 0))
+                        w.max_freq = int(msg.get("max_freq", 0))
+                        print(f"Worker {wid} a terminé le wordcount.")
+                    if workers and all(w.wordcount_done for w in workers.values()):
+                        print("Tous les wordcounts sont terminés.")
+                        wordcount_done_event.set()
+
+            elif mtype == "SORT_DONE":
+                wid = msg.get("worker_id")
+                if not isinstance(wid, str):
+                    continue
+                with workers_lock:
+                    w = workers.get(wid)
+                    if w:
+                        w.sort_done = True
+                        print(f"Worker {wid} a terminé le tri.")
+                    if workers and all(w.sort_done for w in workers.values()):
                         all_done.set()
 
             elif mtype == "SHUTDOWN":
@@ -164,7 +183,7 @@ def distribute_splits(num_splits: int, worker_ids: List[str]) -> Dict[str, List[
     return assignments
 
 
-def run_master(host: str, port: int, expected_workers: int, num_splits: int) -> None:
+def run_master(host: str, port: int, expected_workers: int, num_splits: int, freq_step: int) -> None:
     print(
         f"Master en attente de {expected_workers} workers sur {host}:{port} "
         f"(nombre de splits = {num_splits})"
@@ -215,18 +234,54 @@ def run_master(host: str, port: int, expected_workers: int, num_splits: int) -> 
 
             global job_start_time
             job_start_time = time.perf_counter()
+            all_done.clear()
+            wordcount_done_event.clear()
+
+            def assign_sort_intervals() -> None:
+                with workers_lock:
+                    if not workers:
+                        return
+                    min_freq = min(w.min_freq for w in workers.values())
+                    max_freq = max(w.max_freq for w in workers.values())
+                    if max_freq < min_freq:
+                        max_freq = min_freq
+                    current_min = min_freq
+                    step = max(1, freq_step)
+                    for idx, wid in enumerate(worker_ids):
+                        high = current_min + step - 1
+                        if idx == len(worker_ids) - 1:
+                            high = max_freq
+                        workers[wid].interval = (current_min, high)
+                        current_min = high + 1
+
+            def notify_sort_phase() -> None:
+                with workers_lock:
+                    for wid in worker_ids:
+                        w = workers[wid]
+                        interval = w.interval or (0, 0)
+                        send_msg(
+                            w.conn,
+                            {
+                                "type": "START_SORT",
+                                "interval": {"min": interval[0], "max": interval[1]},
+                            },
+                        )
 
             for wid in worker_ids:
                 w = workers[wid]
                 msg = {
-                    "type": "START_JOB",
+                    "type": "START_WORDCOUNT",
                     "worker_id": wid,
                     "all_workers": worker_list,
                     "splits": assignments[wid],
                 }
                 send_msg(w.conn, msg)
 
-            print("Job MapReduce lance. Attente de la fin de tous les workers...")
+            print("Phase 1 (wordcount) lancee. Attente de la phase 2 (tri repartie)...")
+            wordcount_done_event.wait()
+            assign_sort_intervals()
+            notify_sort_phase()
+            print("Phase 2 (tri) lancee...")
             all_done.wait()
             duration = None
             if job_start_time is not None:
@@ -264,6 +319,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Nombre total de splits logiques a distribuer",
     )
+    parser.add_argument(
+        "--frequency-step",
+        type=int,
+        default=100,
+        help="Taille des intervalles de frequence pour le tri repartit",
+    )
     return parser.parse_args()
 
 
@@ -282,4 +343,4 @@ def write_master_metrics(duration: float, workers: int, splits: int) -> None:
 
 if __name__ == "__main__":
     args = parse_args()
-    run_master(args.host, args.port, args.workers, args.splits)
+    run_master(args.host, args.port, args.workers, args.splits, args.frequency_step)
