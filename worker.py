@@ -1,10 +1,12 @@
 # client.py
 import argparse
 import json
+import re
 import socket
 import struct
 import threading
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 
@@ -24,6 +26,11 @@ Les données applicatives (texte, clés/valeurs) ne transitent jamais par le mas
 
 MASTER_PORT = 5374
 DEFAULT_SHUFFLE_PORT = 6000
+DEFAULT_DATA_DIR = "/cal/commoncrawl"
+DEFAULT_FILE_PREFIX = "CC-MAIN-20230320083513-20230320113513-"
+DEFAULT_FILE_SUFFIX = ".warc.wet"
+DEFAULT_SPLIT_PADDING = 5
+WORD_RE = re.compile(r"[A-Za-z0-9']+")
 
 
 def recv_all(sock: socket.socket, expected: int) -> bytes:
@@ -130,18 +137,44 @@ def handle_shuffle_connection(
                 shuffle_state.mark_sender_done(sender)
 
 
-def simple_map_for_split(split_id: int) -> Dict[str, int]:
-    """
-    Map simplifiee pour un split.
+def build_split_path(
+    split_id: int,
+    data_dir: str,
+    file_prefix: str,
+    file_suffix: str,
+    split_padding: int,
+) -> Path:
+    filename = f"{file_prefix}{split_id:0{split_padding}d}{file_suffix}"
+    return Path(data_dir) / filename
 
-    Cette fonction est volontairement generique : elle ne lit pas de fichier.
-    Elle simule des cles derivees de l'identifiant du split.
+
+def wordcount_map_for_split(
+    split_id: int,
+    data_dir: str,
+    file_prefix: str,
+    file_suffix: str,
+    split_padding: int,
+) -> Dict[str, int]:
     """
-    base = f"split{split_id}"
-    keys = [base, base + "_a", base + "_b"]
+    Lit un fichier CommonCrawl (format WET) et renvoie le wordcount du split.
+
+    Les fichiers sont nommes comme suit :
+    <file_prefix><numero zero-pad><file_suffix>
+    Exemple : CC-...-00000.warc.wet
+    """
     counts: Dict[str, int] = defaultdict(int)
-    for k in keys:
-        counts[k] += 1
+    file_path = build_split_path(split_id, data_dir, file_prefix, file_suffix, split_padding)
+
+    try:
+        with file_path.open("r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                for match in WORD_RE.findall(line.lower()):
+                    counts[match] += 1
+    except FileNotFoundError:
+        print(f"[worker] Fichier introuvable pour le split {split_id}: {file_path}")
+    except OSError as exc:
+        print(f"[worker] Erreur lecture {file_path}: {exc}")
+
     return dict(counts)
 
 
@@ -151,6 +184,10 @@ def run_map_shuffle_reduce(
     all_workers: List[dict],
     shuffle_host: str,
     shuffle_port: int,
+    data_dir: str,
+    file_prefix: str,
+    file_suffix: str,
+    split_padding: int,
 ) -> Dict[str, int]:
     worker_ids = [w["worker_id"] for w in all_workers]
     num_workers = len(worker_ids)
@@ -173,7 +210,13 @@ def run_map_shuffle_reduce(
     }
 
     for split_id in splits:
-        local_counts = simple_map_for_split(split_id)
+        local_counts = wordcount_map_for_split(
+            split_id=split_id,
+            data_dir=data_dir,
+            file_prefix=file_prefix,
+            file_suffix=file_suffix,
+            split_padding=split_padding,
+        )
         for key, value in local_counts.items():
             target_index = hash(key) % num_workers
             target_id = worker_ids[target_index]
@@ -221,6 +264,10 @@ def run_worker(
     master_port: int,
     shuffle_host: str,
     shuffle_port: int,
+    data_dir: str,
+    file_prefix: str,
+    file_suffix: str,
+    split_padding: int,
 ) -> None:
     with socket.create_connection((master_host, master_port)) as sock:
         send_msg(
@@ -255,6 +302,10 @@ def run_worker(
                     all_workers=all_workers,
                     shuffle_host=shuffle_host,
                     shuffle_port=shuffle_port,
+                    data_dir=data_dir,
+                    file_prefix=file_prefix,
+                    file_suffix=file_suffix,
+                    split_padding=split_padding,
                 )
                 print(
                     f"[worker {worker_id}] Job termine, "
@@ -293,6 +344,27 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SHUFFLE_PORT,
         help="Port local pour le shuffle (defaut: 6000)",
     )
+    parser.add_argument(
+        "--data-dir",
+        default=DEFAULT_DATA_DIR,
+        help="Repertoire contenant les fichiers CommonCrawl (defaut: /cal/commoncrawl)",
+    )
+    parser.add_argument(
+        "--file-prefix",
+        default=DEFAULT_FILE_PREFIX,
+        help="Prefixe des fichiers WET (defaut: CC-MAIN-20230320083513-20230320113513-)",
+    )
+    parser.add_argument(
+        "--file-suffix",
+        default=DEFAULT_FILE_SUFFIX,
+        help="Suffixe des fichiers WET (defaut: .warc.wet)",
+    )
+    parser.add_argument(
+        "--split-padding",
+        type=int,
+        default=DEFAULT_SPLIT_PADDING,
+        help="Nombre de chiffres pour zero-pad l'index de split (defaut: 5)",
+    )
     return parser.parse_args()
 
 
@@ -304,4 +376,8 @@ if __name__ == "__main__":
         master_port=args.master_port,
         shuffle_host=args.shuffle_host,
         shuffle_port=args.shuffle_port,
+        data_dir=args.data_dir,
+        file_prefix=args.file_prefix,
+        file_suffix=args.file_suffix,
+        split_padding=args.split_padding,
     )
