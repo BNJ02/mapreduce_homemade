@@ -5,7 +5,7 @@ import re
 import socket
 import struct
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from collections import defaultdict
 import os
 from pathlib import Path
@@ -33,6 +33,7 @@ DEFAULT_FILE_PREFIX = "CC-MAIN-20230320083513-20230320113513-"
 DEFAULT_FILE_SUFFIX = ".warc.wet"
 DEFAULT_SPLIT_PADDING = 5
 DEFAULT_OUTPUT_DIR = str(Path(__file__).resolve().parent / "output")
+CHUNK_LINE_COUNT = 5000
 WORD_RE = re.compile(r"[A-Za-z0-9']+")
 
 
@@ -151,12 +152,21 @@ def build_split_path(
     return Path(data_dir) / filename
 
 
+def count_words_in_lines(lines: List[str]) -> Dict[str, int]:
+    local_counts: Dict[str, int] = defaultdict(int)
+    for line in lines:
+        for match in WORD_RE.findall(line.lower()):
+            local_counts[match] += 1
+    return local_counts
+
+
 def wordcount_map_for_split(
     split_id: int,
     data_dir: str,
     file_prefix: str,
     file_suffix: str,
     split_padding: int,
+    process_pool: ProcessPoolExecutor,
 ) -> Dict[str, int]:
     """
     Lit un fichier CommonCrawl (format WET) et renvoie le wordcount du split.
@@ -169,10 +179,24 @@ def wordcount_map_for_split(
     file_path = build_split_path(split_id, data_dir, file_prefix, file_suffix, split_padding)
 
     try:
+        chunk_futures = []
+        current_chunk: List[str] = []
+
         with file_path.open("r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
-                for match in WORD_RE.findall(line.lower()):
-                    counts[match] += 1
+                current_chunk.append(line)
+                if len(current_chunk) >= CHUNK_LINE_COUNT:
+                    chunk = current_chunk
+                    current_chunk = []
+                    chunk_futures.append(process_pool.submit(count_words_in_lines, chunk))
+
+        if current_chunk:
+            chunk_futures.append(process_pool.submit(count_words_in_lines, current_chunk))
+
+        for future in chunk_futures:
+            local_counts = future.result()
+            for key, value in local_counts.items():
+                counts[key] += value
     except FileNotFoundError:
         print(f"[worker] Fichier introuvable pour le split {split_id}: {file_path}")
     except OSError as exc:
@@ -246,28 +270,28 @@ def run_map_shuffle_reduce(
         wid: defaultdict(int) for wid in worker_ids if wid != worker_id
     }
 
-    effective_threads = max(1, map_threads)
-    if not splits:
-        effective_threads = 1
+    total_threads = max(1, map_threads)
+    process_pool: ProcessPoolExecutor | None = None
+    if splits:
+        process_pool = ProcessPoolExecutor(max_workers=total_threads)
 
-    def process_split(split_id: int) -> Dict[str, int]:
-        return wordcount_map_for_split(
-            split_id=split_id,
-            data_dir=data_dir,
-            file_prefix=file_prefix,
-            file_suffix=file_suffix,
-            split_padding=split_padding,
-        )
-
-    with ThreadPoolExecutor(max_workers=effective_threads) as executor:
-        future_to_split = {executor.submit(process_split, split_id): split_id for split_id in splits}
-        for future in as_completed(future_to_split):
-            split_id = future_to_split[future]
-            try:
-                local_counts = future.result()
-            except Exception as exc:  # pragma: no cover - log unexpected errors
-                print(f"[worker {worker_id}] Erreur Map split {split_id}: {exc}")
-                continue
+    try:
+        for split_id in splits:
+            if process_pool is None:
+                local_counts = {}
+            else:
+                try:
+                    local_counts = wordcount_map_for_split(
+                        split_id=split_id,
+                        data_dir=data_dir,
+                        file_prefix=file_prefix,
+                        file_suffix=file_suffix,
+                        split_padding=split_padding,
+                        process_pool=process_pool,
+                    )
+                except Exception as exc:  # pragma: no cover
+                    print(f"[worker {worker_id}] Erreur Map split {split_id}: {exc}")
+                    continue
             for key, value in local_counts.items():
                 target_index = hash(key) % num_workers
                 target_id = worker_ids[target_index]
@@ -275,6 +299,9 @@ def run_map_shuffle_reduce(
                     aggregated_local[key] += value
                 else:
                     outgoing[target_id][key] += value
+    finally:
+        if process_pool:
+            process_pool.shutdown()
 
     for target in outgoing:
         pairs = [[k, v] for k, v in outgoing[target].items()]
