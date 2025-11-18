@@ -5,7 +5,9 @@ import signal
 import socket
 import struct
 import threading
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List
 
 
@@ -25,6 +27,7 @@ Le shuffle des données se fait directement entre workers.
 
 HOST = "0.0.0.0"
 PORT = 5374
+OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 running_event = threading.Event()
 running_event.set()
@@ -89,6 +92,7 @@ workers: Dict[str, WorkerState] = {}
 workers_lock = threading.Lock()
 all_registered = threading.Event()
 all_done = threading.Event()
+job_start_time: float | None = None
 
 
 def handle_worker(conn: socket.socket, addr, expected_workers: int) -> None:
@@ -209,6 +213,9 @@ def run_master(host: str, port: int, expected_workers: int, num_splits: int) -> 
             for wid, splits in assignments.items():
                 print(f"  {wid}: {splits}")
 
+            global job_start_time
+            job_start_time = time.perf_counter()
+
             for wid in worker_ids:
                 w = workers[wid]
                 msg = {
@@ -221,6 +228,14 @@ def run_master(host: str, port: int, expected_workers: int, num_splits: int) -> 
 
             print("Job MapReduce lance. Attente de la fin de tous les workers...")
             all_done.wait()
+            duration = None
+            if job_start_time is not None:
+                duration = time.perf_counter() - job_start_time
+                print(
+                    f"Phases Map+Shuffle+Reduce terminees en {duration:.2f} s "
+                    f"(workers={len(worker_ids)}, splits={num_splits})"
+                )
+                write_master_metrics(duration, len(worker_ids), num_splits)
             print("Tous les workers ont signale la fin du job.")
 
         finally:
@@ -250,6 +265,19 @@ def parse_args() -> argparse.Namespace:
         help="Nombre total de splits logiques a distribuer",
     )
     return parser.parse_args()
+
+
+def write_master_metrics(duration: float, workers: int, splits: int) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "duration_seconds": duration,
+        "workers": workers,
+        "splits": splits,
+        "timestamp": time.time(),
+    }
+    out_path = OUTPUT_DIR / "master_metrics.json"
+    with out_path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":

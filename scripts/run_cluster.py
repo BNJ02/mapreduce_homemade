@@ -22,10 +22,12 @@ toutes les machines listées (même chemin `remote-path`).
 from __future__ import annotations
 
 import argparse
+import json
+import time
 import shlex
 import signal
 import subprocess
-import time
+from collections import Counter
 from pathlib import Path
 from typing import List
 
@@ -128,6 +130,75 @@ def launch(cmd: List[str]) -> subprocess.Popen:
     return subprocess.Popen(cmd)
 
 
+def summarize_outputs(output_dir: Path) -> None:
+    if not output_dir.exists():
+        print(f"[launcher] Aucun dossier de sortie trouve: {output_dir}")
+        return
+
+    files = sorted(output_dir.glob("*_wordcount.json"))
+    if not files:
+        print(f"[launcher] Aucun fichier *_wordcount.json dans {output_dir}")
+        return
+
+    aggregated = Counter()
+    per_worker = []
+    for path in files:
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"[launcher] Impossible de lire {path}: {exc}")
+            continue
+        counts = data.get("counts") or {}
+        if isinstance(counts, dict):
+            aggregated.update({k: int(v) for k, v in counts.items()})
+        total = int(data.get("total_words", 0))
+        unique = int(data.get("unique_words", 0))
+        per_worker.append((path.name, total, unique))
+
+    if not aggregated:
+        print("[launcher] Donnees wordcount introuvables dans les fichiers.")
+        return
+
+    total_words = sum(total for _, total, _ in per_worker)
+    total_unique = len(aggregated)
+    print(f"[launcher] Statistiques globales:")
+    print(f"  - Total mots : {total_words}")
+    print(f"  - Mots uniques : {total_unique}")
+    print("  - Top 20 global :")
+    for word, count in aggregated.most_common(20):
+        print(f"      {word}: {count}")
+
+    print("  - Detail par worker :")
+    for name, total, unique in per_worker:
+        print(f"      {name}: {total} mots, {unique} uniques")
+
+    display_master_metrics(output_dir)
+
+
+def display_master_metrics(output_dir: Path) -> None:
+    metrics_path = output_dir / "master_metrics.json"
+    if not metrics_path.exists():
+        print("[launcher] Fichier master_metrics.json introuvable (job interrompu ?)")
+        return
+    try:
+        with metrics_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[launcher] Impossible de lire {metrics_path}: {exc}")
+        return
+    duration = data.get("duration_seconds")
+    workers = data.get("workers")
+    splits = data.get("splits")
+    if duration is None:
+        print("[launcher] Durée MapReduce absente dans master_metrics.json")
+        return
+    print(
+        f"[launcher] Temps Map+Shuffle+Reduce (depuis le master): {duration:.2f} s "
+        f"(workers={workers}, splits={splits})"
+    )
+
+
 def main() -> int:
     args = parse_args()
     nodes = read_nodes(Path(args.nodes_file))
@@ -197,6 +268,8 @@ def main() -> int:
                 args.file_suffix,
                 "--split-padding",
                 str(args.split_padding),
+                "--output-dir",
+                str(Path(remote_root) / "output"),
             ]
             worker_ssh = build_ssh_command(node, remote_root, worker_cmd)
             print(f"[launcher] Démarrage du worker sur {node} (shuffle {shuffle_port})...")
@@ -207,6 +280,7 @@ def main() -> int:
             processes[0].wait()
             for proc in processes[1:]:
                 proc.wait()
+        summarize_outputs(Path(remote_root) / "output")
     except KeyboardInterrupt:
         print("[launcher] Interruption reçue, arrêt des processus...")
     finally:

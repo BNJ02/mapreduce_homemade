@@ -5,7 +5,9 @@ import re
 import socket
 import struct
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
+import os
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -30,6 +32,7 @@ DEFAULT_DATA_DIR = "/cal/commoncrawl"
 DEFAULT_FILE_PREFIX = "CC-MAIN-20230320083513-20230320113513-"
 DEFAULT_FILE_SUFFIX = ".warc.wet"
 DEFAULT_SPLIT_PADDING = 5
+DEFAULT_OUTPUT_DIR = str(Path(__file__).resolve().parent / "output")
 WORD_RE = re.compile(r"[A-Za-z0-9']+")
 
 
@@ -178,6 +181,39 @@ def wordcount_map_for_split(
     return dict(counts)
 
 
+def persist_results(
+    worker_id: str,
+    splits: List[int],
+    final_counts: Dict[str, int],
+    output_dir: str,
+) -> Path:
+    """
+    Ecrit les resultats du wordcount et des indicateurs derives dans un fichier JSON.
+    """
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    total_words = sum(final_counts.values())
+    unique_words = len(final_counts)
+    vocab_density = (unique_words / total_words) if total_words else 0.0
+    top_items = sorted(final_counts.items(), key=lambda kv: kv[1], reverse=True)[:20]
+
+    result = {
+        "worker_id": worker_id,
+        "splits": splits,
+        "total_words": total_words,
+        "unique_words": unique_words,
+        "vocab_density": vocab_density,
+        "top_words": [{"word": k, "count": v} for k, v in top_items],
+        "counts": final_counts,
+    }
+
+    output_path = out_dir / f"{worker_id}_wordcount.json"
+    with output_path.open("w", encoding="utf-8") as fh:
+        json.dump(result, fh, ensure_ascii=False, indent=2)
+    return output_path
+
+
 def run_map_shuffle_reduce(
     worker_id: str,
     splits: List[int],
@@ -188,6 +224,7 @@ def run_map_shuffle_reduce(
     file_prefix: str,
     file_suffix: str,
     split_padding: int,
+    map_threads: int,
 ) -> Dict[str, int]:
     worker_ids = [w["worker_id"] for w in all_workers]
     num_workers = len(worker_ids)
@@ -209,21 +246,35 @@ def run_map_shuffle_reduce(
         wid: defaultdict(int) for wid in worker_ids if wid != worker_id
     }
 
-    for split_id in splits:
-        local_counts = wordcount_map_for_split(
+    effective_threads = max(1, map_threads)
+    if not splits:
+        effective_threads = 1
+
+    def process_split(split_id: int) -> Dict[str, int]:
+        return wordcount_map_for_split(
             split_id=split_id,
             data_dir=data_dir,
             file_prefix=file_prefix,
             file_suffix=file_suffix,
             split_padding=split_padding,
         )
-        for key, value in local_counts.items():
-            target_index = hash(key) % num_workers
-            target_id = worker_ids[target_index]
-            if target_id == worker_id:
-                aggregated_local[key] += value
-            else:
-                outgoing[target_id][key] += value
+
+    with ThreadPoolExecutor(max_workers=effective_threads) as executor:
+        future_to_split = {executor.submit(process_split, split_id): split_id for split_id in splits}
+        for future in as_completed(future_to_split):
+            split_id = future_to_split[future]
+            try:
+                local_counts = future.result()
+            except Exception as exc:  # pragma: no cover - log unexpected errors
+                print(f"[worker {worker_id}] Erreur Map split {split_id}: {exc}")
+                continue
+            for key, value in local_counts.items():
+                target_index = hash(key) % num_workers
+                target_id = worker_ids[target_index]
+                if target_id == worker_id:
+                    aggregated_local[key] += value
+                else:
+                    outgoing[target_id][key] += value
 
     for target in outgoing:
         pairs = [[k, v] for k, v in outgoing[target].items()]
@@ -268,6 +319,8 @@ def run_worker(
     file_prefix: str,
     file_suffix: str,
     split_padding: int,
+    map_threads: int,
+    output_dir: str,
 ) -> None:
     with socket.create_connection((master_host, master_port)) as sock:
         send_msg(
@@ -296,9 +349,10 @@ def run_worker(
                     f"[worker {worker_id}] Debut du job "
                     f"(splits assignes: {splits}, nb workers = {len(all_workers)})"
                 )
+                split_ids = [int(s) for s in splits]
                 final_counts = run_map_shuffle_reduce(
                     worker_id=worker_id,
-                    splits=[int(s) for s in splits],
+                    splits=split_ids,
                     all_workers=all_workers,
                     shuffle_host=shuffle_host,
                     shuffle_port=shuffle_port,
@@ -306,10 +360,17 @@ def run_worker(
                     file_prefix=file_prefix,
                     file_suffix=file_suffix,
                     split_padding=split_padding,
+                    map_threads=map_threads,
+                )
+                output_path = persist_results(
+                    worker_id=worker_id,
+                    splits=split_ids,
+                    final_counts=final_counts,
+                    output_dir=output_dir,
                 )
                 print(
                     f"[worker {worker_id}] Job termine, "
-                    f"{len(final_counts)} cles reduites."
+                    f"{len(final_counts)} cles reduites. Resultats: {output_path}"
                 )
                 send_msg(
                     sock,
@@ -365,6 +426,11 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SPLIT_PADDING,
         help="Nombre de chiffres pour zero-pad l'index de split (defaut: 5)",
     )
+    parser.add_argument(
+        "--output-dir",
+        default=DEFAULT_OUTPUT_DIR,
+        help="Repertoire de sortie pour les resultats du worker (defaut: output/)",
+    )
     return parser.parse_args()
 
 
@@ -380,4 +446,6 @@ if __name__ == "__main__":
         file_prefix=args.file_prefix,
         file_suffix=args.file_suffix,
         split_padding=args.split_padding,
+        map_threads=max(1, os.cpu_count() or 1),
+        output_dir=args.output_dir,
     )
