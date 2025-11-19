@@ -119,6 +119,11 @@ def parse_args() -> argparse.Namespace:
         help="Taille des intervalles de frequence pour la phase de tri",
     )
     parser.add_argument(
+        "--output-dir",
+        default="output",
+        help="Repertoire cible pour les fichiers de sortie (relatif au remote-path par defaut)",
+    )
+    parser.add_argument(
         "--uv-bin",
         default=str(Path.home() / ".local/bin/uv"),
         help="Chemin vers l'exécutable uv (defaut: ~/.local/bin/uv)",
@@ -147,6 +152,9 @@ def main() -> int:
     remote_root = args.remote_path.rstrip("/")
     remote_master = f"{remote_root}/master.py"
     remote_worker = f"{remote_root}/worker.py"
+    output_dir = Path(args.output_dir)
+    if not output_dir.is_absolute():
+        output_dir = Path(remote_root) / output_dir
 
     master_node = args.master_node or nodes[0]
     remaining_nodes = [n for n in nodes if n != master_node]
@@ -180,6 +188,8 @@ def main() -> int:
         str(args.splits),
         "--frequency-step",
         str(args.frequency_step),
+        "--output-dir",
+        str(output_dir),
     ]
     master_ssh = build_ssh_command(master_node, remote_root, master_cmd)
     try:
@@ -213,7 +223,7 @@ def main() -> int:
                 "--split-padding",
                 str(args.split_padding),
                 "--output-dir",
-                str(Path(remote_root) / "output"),
+                str(output_dir),
             ]
             worker_ssh = build_ssh_command(node, remote_root, worker_cmd)
             print(f"[launcher] Démarrage du worker sur {node} (shuffle {shuffle_port})...")
@@ -224,7 +234,7 @@ def main() -> int:
             processes[0].wait()
             for proc in processes[1:]:
                 proc.wait()
-        summary = summarize_output_dir(Path(remote_root) / "output")
+        summary = summarize_output_dir(output_dir)
         if summary is None:
             print(f"[launcher] Aucun résultat trouvé dans {remote_root}/output")
         else:

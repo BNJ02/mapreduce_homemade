@@ -238,7 +238,7 @@ def main() -> int:
     configure_ssh_options(args.remote_host)
     repo_root = Path(__file__).resolve().parents[1]
     remote_path = args.remote_path.rstrip("/")
-    remote_output = f"{remote_path}/output"
+    remote_output_base = f"{remote_path}/output"
     remote_nodes_file = remote_join(remote_path, args.nodes_file)
     remote_run_cluster = remote_join(remote_path, "scripts/run_cluster.py")
     remote_results_summary = remote_join(remote_path, "scripts/results_summary.py")
@@ -254,6 +254,10 @@ def main() -> int:
 
     for workers in args.worker_counts:
         print(f"[benchmark] Run avec {workers} workers, {args.splits} splits")
+        remote_output_dir = f"{remote_output_base}/workers{workers}_splits{args.splits}"
+        purge_cmd = f"rm -rf {shlex.quote(remote_output_dir)} && mkdir -p {shlex.quote(remote_output_dir)}"
+        ssh_cmd(args.remote_host, remote_path, purge_cmd)
+
         run_cmd_for_cluster = (
             f"{shlex.quote(args.remote_uv_bin)} run python {shlex.quote(remote_run_cluster)} "
             f"--nodes-file {shlex.quote(remote_nodes_file)} "
@@ -264,7 +268,8 @@ def main() -> int:
             f"--data-dir /cal/commoncrawl "
             f"--file-prefix CC-MAIN-20230320083513-20230320113513- "
             f"--file-suffix .warc.wet "
-            f"--split-padding 5"
+            f"--split-padding 5 "
+            f"--output-dir {shlex.quote(remote_output_dir)}"
         )
         try:
             run_proc = ssh_cmd(args.remote_host, remote_path, run_cmd_for_cluster, capture=True)
@@ -282,7 +287,7 @@ def main() -> int:
 
         summary_cmd = (
             f"python3 {shlex.quote(remote_results_summary)} "
-            f"--output-dir {shlex.quote(remote_output)} --json"
+            f"--output-dir {shlex.quote(remote_output_dir)} --json"
         )
         summary_proc = ssh_cmd(
             args.remote_host,
@@ -310,7 +315,7 @@ def main() -> int:
         label = f"run_workers{workers}_splits{args.splits}"
         exported_path = fetch_remote_output(
             args.remote_host,
-            remote_output,
+            remote_output_dir,
             export_root,
             label,
         )

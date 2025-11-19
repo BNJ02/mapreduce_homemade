@@ -1,6 +1,7 @@
 # serveur.py
 import argparse
 import json
+import math
 import signal
 import socket
 import struct
@@ -245,8 +246,12 @@ def run_master(host: str, port: int, expected_workers: int, num_splits: int, fre
                     max_freq = max(w.max_freq for w in workers.values())
                     if max_freq < min_freq:
                         max_freq = min_freq
+                    total_range = max_freq - min_freq + 1
+                    if freq_step and freq_step > 0:
+                        step = freq_step
+                    else:
+                        step = max(1, math.ceil(total_range / len(worker_ids)))
                     current_min = min_freq
-                    step = max(1, freq_step)
                     for idx, wid in enumerate(worker_ids):
                         high = current_min + step - 1
                         if idx == len(worker_ids) - 1:
@@ -264,6 +269,19 @@ def run_master(host: str, port: int, expected_workers: int, num_splits: int, fre
                             {
                                 "type": "START_SORT",
                                 "interval": {"min": interval[0], "max": interval[1]},
+                                "intervals": [
+                                    {
+                                        "worker_id": wid2,
+                                        "min": workers[wid2].interval[0]
+                                        if workers[wid2].interval
+                                        else 0,
+                                        "max": workers[wid2].interval[1]
+                                        if workers[wid2].interval
+                                        else 0,
+                                    }
+                                    for wid2 in worker_ids
+                                ],
+                                "all_workers": worker_list,
                             },
                         )
 
@@ -290,7 +308,7 @@ def run_master(host: str, port: int, expected_workers: int, num_splits: int, fre
                     f"Phases Map+Shuffle+Reduce terminees en {duration:.2f} s "
                     f"(workers={len(worker_ids)}, splits={num_splits})"
                 )
-                write_master_metrics(duration, len(worker_ids), num_splits)
+                write_master_metrics(duration, len(worker_ids), num_splits, OUTPUT_DIR)
             print("Tous les workers ont signale la fin du job.")
 
         finally:
@@ -322,25 +340,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--frequency-step",
         type=int,
-        default=100,
-        help="Taille des intervalles de frequence pour le tri repartit",
+        default=0,
+        help="Pas fixe pour les intervalles (0 = repartition automatique)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=str(OUTPUT_DIR),
+        help="Repertoire de sortie pour les resultats du master (defaut: ./output)",
     )
     return parser.parse_args()
 
 
-def write_master_metrics(duration: float, workers: int, splits: int) -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def write_master_metrics(duration: float, workers: int, splits: int, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "duration_seconds": duration,
         "workers": workers,
         "splits": splits,
         "timestamp": time.time(),
     }
-    out_path = OUTPUT_DIR / "master_metrics.json"
+    out_path = output_dir / "master_metrics.json"
     with out_path.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
     args = parse_args()
+    OUTPUT_DIR = Path(args.output_dir)
     run_master(args.host, args.port, args.workers, args.splits, args.frequency_step)

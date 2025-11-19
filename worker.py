@@ -1,5 +1,6 @@
 # client.py
 import argparse
+import hashlib
 import json
 import re
 import socket
@@ -35,6 +36,11 @@ DEFAULT_SPLIT_PADDING = 5
 DEFAULT_OUTPUT_DIR = str(Path(__file__).resolve().parent / "output")
 CHUNK_LINE_COUNT = 5000
 WORD_RE = re.compile(r"[A-Za-z0-9']+")
+
+
+def deterministic_hash(key: str) -> int:
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big", signed=False)
 
 
 def recv_all(sock: socket.socket, expected: int) -> bytes:
@@ -310,7 +316,7 @@ def run_map_shuffle_reduce(
                     print(f"[worker {worker_id}] Erreur Map split {split_id}: {exc}")
                     continue
             for key, value in local_counts.items():
-                target_index = hash(key) % num_workers
+                target_index = deterministic_hash(key) % num_workers
                 target_id = worker_ids[target_index]
                 if target_id == worker_id:
                     aggregated_local[key] += value
@@ -351,6 +357,122 @@ def run_map_shuffle_reduce(
         final_counts[key] += value
 
     return dict(final_counts)
+
+
+def assign_interval_owner(
+    count: int, intervals: List[dict], default_worker: str
+) -> str:
+    for interval in intervals:
+        if not isinstance(interval, dict):
+            continue
+        wid = interval.get("worker_id")
+        min_freq = int(interval.get("min", 0))
+        max_freq = int(interval.get("max", 0))
+        if min_freq <= count <= max_freq:
+            return wid
+    return default_worker
+
+
+def distribute_chunk(
+    chunk: List[Tuple[str, int]],
+    intervals: List[dict],
+    worker_id: str,
+    worker_ids: List[str],
+) -> Tuple[Dict[str, int], Dict[str, List[Tuple[str, int]]]]:
+    local_data: Dict[str, int] = {}
+    outgoing: Dict[str, List[Tuple[str, int]]] = {wid: [] for wid in worker_ids if wid != worker_id}
+    for word, freq in chunk:
+        target = assign_interval_owner(freq, intervals, worker_id)
+        if target == worker_id:
+            local_data[word] = freq
+        else:
+            outgoing.setdefault(target, []).append((word, freq))
+    return local_data, outgoing
+
+
+def run_sort_phase(
+    worker_id: str,
+    wordcounts: Dict[str, int],
+    intervals: List[dict],
+    my_interval: Tuple[int, int],
+    all_workers: List[dict],
+    shuffle_host: str,
+    shuffle_port: int,
+    map_threads: int,
+) -> List[Tuple[str, int]]:
+    worker_ids = [w["worker_id"] for w in all_workers]
+    peers = [wid for wid in worker_ids if wid != worker_id]
+    shuffle_state = ShuffleState(expected_peers=peers)
+    listener_thread = threading.Thread(
+        target=shuffle_listener,
+        args=(shuffle_host, shuffle_port, shuffle_state),
+        daemon=True,
+    )
+    listener_thread.start()
+
+    local_bucket: Dict[str, int] = {}
+    outgoing_pairs: Dict[str, List[Tuple[str, int]]] = {
+        wid: [] for wid in worker_ids if wid != worker_id
+    }
+
+    items = list(wordcounts.items())
+    max_workers = max(1, map_threads)
+    chunk_size = max(1, len(items) // max_workers)
+    chunks: List[List[Tuple[str, int]]] = [
+        items[i : i + chunk_size] for i in range(0, len(items), chunk_size)
+    ]
+
+    if len(chunks) > 1:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(distribute_chunk, chunk, intervals, worker_id, worker_ids)
+                for chunk in chunks
+            ]
+            for future in futures:
+                chunk_local, chunk_outgoing = future.result()
+                local_bucket.update(chunk_local)
+                for target, pairs in chunk_outgoing.items():
+                    if not pairs:
+                        continue
+                    outgoing_pairs.setdefault(target, []).extend(pairs)
+    else:
+        for word, freq in items:
+            target = assign_interval_owner(freq, intervals, worker_id)
+            if target == worker_id:
+                local_bucket[word] = freq
+            else:
+                outgoing_pairs.setdefault(target, []).append((word, freq))
+
+    for target in outgoing_pairs:
+        pairs = [[word, freq] for word, freq in outgoing_pairs[target]]
+        msg = {
+            "type": "SHUFFLE_DATA",
+            "from": worker_id,
+            "pairs": pairs,
+            "done": True,
+        }
+        target_info = next(w for w in all_workers if w["worker_id"] == target)
+        try:
+            with socket.create_connection(
+                (target_info["host"], target_info["shuffle_port"])
+            ) as sock:
+                send_msg(sock, msg)
+        except OSError as exc:
+            print(f"[worker {worker_id}] Erreur tri vers {target}: {exc}")
+
+    if peers:
+        shuffle_state.mark_sender_done(worker_id)
+        shuffle_state.done_event.wait()
+
+    final_bucket: Dict[str, int] = dict(local_bucket)
+    for word, freq in shuffle_state.data.items():
+        final_bucket[word] = freq
+
+    sorted_items = sorted(
+        final_bucket.items(),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    return sorted_items
 
 
 def all_workers_done(state: Dict[str, int], nb_workers: int) -> bool:
@@ -434,19 +556,23 @@ def run_worker(
 
             elif mtype == "START_SORT":
                 interval = msg.get("interval") or {}
+                intervals = msg.get("intervals") or []
+                all_workers_sort = msg.get("all_workers") or all_workers_meta
                 min_freq = int(interval.get("min", 0))
                 max_freq = int(interval.get("max", 0))
                 print(
                     f"[worker {worker_id}] Job 2/2 tri "
                     f"(intervalle [{min_freq}, {max_freq}])"
                 )
-                sorted_items = sorted(
-                    [
-                        (w, c)
-                        for w, c in wordcounts.items()
-                        if min_freq <= c <= max_freq
-                    ],
-                    key=lambda kv: (-kv[1], kv[0]),
+                sorted_items = run_sort_phase(
+                    worker_id=worker_id,
+                    wordcounts=wordcounts,
+                    intervals=intervals,
+                    my_interval=(min_freq, max_freq),
+                    all_workers=all_workers_sort,
+                    shuffle_host=shuffle_host,
+                    shuffle_port=shuffle_port,
+                    map_threads=map_threads,
                 )
                 output_path = persist_sorted_results(
                     worker_id=worker_id,
@@ -536,6 +662,6 @@ if __name__ == "__main__":
         file_prefix=args.file_prefix,
         file_suffix=args.file_suffix,
         split_padding=args.split_padding,
-        map_threads=1, #max(1, os.cpu_count() or 1),
+        map_threads=max(1, os.cpu_count() or 1),
         output_dir=args.output_dir,
     )
