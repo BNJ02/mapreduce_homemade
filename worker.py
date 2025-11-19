@@ -2,15 +2,17 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import socket
 import struct
 import threading
-from concurrent.futures import ProcessPoolExecutor
 from collections import defaultdict
-import os
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+from langdetect import DetectorFactory, LangDetectException, detect
 
 
 """
@@ -36,11 +38,33 @@ DEFAULT_SPLIT_PADDING = 5
 DEFAULT_OUTPUT_DIR = str(Path(__file__).resolve().parent / "output")
 CHUNK_LINE_COUNT = 5000
 WORD_RE = re.compile(r"[A-Za-z0-9']+")
+DetectorFactory.seed = 0
+LOW_FREQ_THRESHOLD = 1000
 
 
 def deterministic_hash(key: str) -> int:
     digest = hashlib.sha256(key.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big", signed=False)
+
+
+def detect_language(text: str) -> str | None:
+    snippet = text.strip()
+    if len(snippet) < 50:
+        return None
+    try:
+        return detect(snippet)
+    except LangDetectException:
+        return None
+
+
+def sample_frequencies(counts: Dict[str, int], max_samples: int = 1000) -> List[int]:
+    if not counts:
+        return []
+    freqs = sorted(counts.values())
+    if len(freqs) <= max_samples:
+        return freqs
+    step = len(freqs) / max_samples
+    return [freqs[int(i * step)] for i in range(max_samples)]
 
 
 def recv_all(sock: socket.socket, expected: int) -> bytes:
@@ -173,7 +197,7 @@ def wordcount_map_for_split(
     file_suffix: str,
     split_padding: int,
     process_pool: ProcessPoolExecutor,
-) -> Dict[str, int]:
+) -> Tuple[Dict[str, int], Dict[str, int]]:
     """
     Lit un fichier CommonCrawl (format WET) et renvoie le wordcount du split.
 
@@ -182,6 +206,7 @@ def wordcount_map_for_split(
     Exemple : CC-...-00000.warc.wet
     """
     counts: Dict[str, int] = defaultdict(int)
+    lang_counts: Dict[str, int] = defaultdict(int)
     file_path = build_split_path(split_id, data_dir, file_prefix, file_suffix, split_padding)
 
     try:
@@ -194,9 +219,15 @@ def wordcount_map_for_split(
                 if len(current_chunk) >= CHUNK_LINE_COUNT:
                     chunk = current_chunk
                     current_chunk = []
+                    lang = detect_language(" ".join(chunk[:200]))
+                    if lang:
+                        lang_counts[lang] += 1
                     chunk_futures.append(process_pool.submit(count_words_in_lines, chunk))
 
         if current_chunk:
+            lang = detect_language(" ".join(current_chunk[:200]))
+            if lang:
+                lang_counts[lang] += 1
             chunk_futures.append(process_pool.submit(count_words_in_lines, current_chunk))
 
         for future in chunk_futures:
@@ -208,13 +239,14 @@ def wordcount_map_for_split(
     except OSError as exc:
         print(f"[worker] Erreur lecture {file_path}: {exc}")
 
-    return dict(counts)
+    return dict(counts), dict(lang_counts)
 
 
 def persist_wordcount_results(
     worker_id: str,
     splits: List[int],
     counts: Dict[str, int],
+    lang_counts: Dict[str, int],
     output_dir: str,
 ) -> Path:
     out_dir = Path(output_dir)
@@ -233,6 +265,7 @@ def persist_wordcount_results(
         "vocab_density": vocab_density,
         "top_words": [{"word": k, "count": v} for k, v in top_items],
         "counts": counts,
+        "languages": lang_counts,
     }
 
     output_path = out_dir / f"{worker_id}_wordcount.json"
@@ -272,7 +305,7 @@ def run_map_shuffle_reduce(
     file_suffix: str,
     split_padding: int,
     map_threads: int,
-) -> Dict[str, int]:
+) -> Tuple[Dict[str, int], Dict[str, int]]:
     worker_ids = [w["worker_id"] for w in all_workers]
     num_workers = len(worker_ids)
     my_index = worker_ids.index(worker_id)
@@ -292,6 +325,7 @@ def run_map_shuffle_reduce(
     outgoing: Dict[str, Dict[str, int]] = {
         wid: defaultdict(int) for wid in worker_ids if wid != worker_id
     }
+    language_counts: Dict[str, int] = defaultdict(int)
 
     total_threads = max(1, map_threads)
     process_pool: ProcessPoolExecutor | None = None
@@ -300,11 +334,14 @@ def run_map_shuffle_reduce(
 
     try:
         for split_id in splits:
+            local_counts: Dict[str, int] = {}
+            local_langs: Dict[str, int] = {}
             if process_pool is None:
                 local_counts = {}
+                local_langs = {}
             else:
                 try:
-                    local_counts = wordcount_map_for_split(
+                    local_counts, local_langs = wordcount_map_for_split(
                         split_id=split_id,
                         data_dir=data_dir,
                         file_prefix=file_prefix,
@@ -315,6 +352,8 @@ def run_map_shuffle_reduce(
                 except Exception as exc:  # pragma: no cover
                     print(f"[worker {worker_id}] Erreur Map split {split_id}: {exc}")
                     continue
+            for lang, value in local_langs.items():
+                language_counts[lang] += value
             for key, value in local_counts.items():
                 target_index = deterministic_hash(key) % num_workers
                 target_id = worker_ids[target_index]
@@ -356,7 +395,7 @@ def run_map_shuffle_reduce(
     for key, value in shuffle_state.data.items():
         final_counts[key] += value
 
-    return dict(final_counts)
+    return dict(final_counts), dict(language_counts)
 
 
 def assign_interval_owner(
@@ -382,7 +421,11 @@ def distribute_chunk(
     local_data: Dict[str, int] = {}
     outgoing: Dict[str, List[Tuple[str, int]]] = {wid: [] for wid in worker_ids if wid != worker_id}
     for word, freq in chunk:
-        target = assign_interval_owner(freq, intervals, worker_id)
+        if freq <= LOW_FREQ_THRESHOLD:
+            target_index = deterministic_hash(word) % len(worker_ids)
+            target = worker_ids[target_index]
+        else:
+            target = assign_interval_owner(freq, intervals, worker_id)
         if target == worker_id:
             local_data[word] = freq
         else:
@@ -504,6 +547,7 @@ def run_worker(
         )
 
         wordcounts: Dict[str, int] = {}
+        langcounts: Dict[str, int] = {}
         all_workers_meta: List[dict] = []
 
         while True:
@@ -522,7 +566,7 @@ def run_worker(
                     f"(splits: {splits}, nb workers = {len(all_workers_meta)})"
                 )
                 split_ids = [int(s) for s in splits]
-                wordcounts = run_map_shuffle_reduce(
+                wordcounts, langcounts = run_map_shuffle_reduce(
                     worker_id=worker_id,
                     splits=split_ids,
                     all_workers=all_workers_meta,
@@ -538,10 +582,12 @@ def run_worker(
                     worker_id=worker_id,
                     splits=split_ids,
                     counts=wordcounts,
+                    lang_counts=langcounts,
                     output_dir=output_dir,
                 )
                 min_freq = min(wordcounts.values()) if wordcounts else 0
                 max_freq = max(wordcounts.values()) if wordcounts else 0
+                sample_freqs = sample_frequencies(wordcounts)
                 send_msg(
                     sock,
                     {
@@ -550,6 +596,7 @@ def run_worker(
                         "num_keys": len(wordcounts),
                         "min_freq": min_freq,
                         "max_freq": max_freq,
+                        "samples": sample_freqs,
                     },
                 )
                 print(f"[worker {worker_id}] Wordcount OK ({len(wordcounts)} cles). {output_path}")

@@ -22,6 +22,7 @@ def summarize_output_dir(output_dir: Path) -> dict | None:
 
     aggregated = Counter()
     per_worker: List[Dict[str, Any]] = []
+    lang_counter: Counter[str] = Counter()
     total_words = 0
 
     for path in worker_files:
@@ -35,6 +36,13 @@ def summarize_output_dir(output_dir: Path) -> dict | None:
         if isinstance(counts, dict):
             try:
                 aggregated.update({k: int(v) for k, v in counts.items()})
+            except (TypeError, ValueError):
+                pass
+
+        langs = data.get("languages")
+        if isinstance(langs, dict):
+            try:
+                lang_counter.update({k: int(v) for k, v in langs.items()})
             except (TypeError, ValueError):
                 pass
 
@@ -64,6 +72,7 @@ def summarize_output_dir(output_dir: Path) -> dict | None:
         "top_words": [{"word": w, "count": c} for w, c in aggregated.most_common(20)],
         "per_worker": per_worker,
         "master_metrics": master_metrics,
+        "languages": [{"lang": lang, "count": count} for lang, count in lang_counter.most_common()],
         "output_dir": str(output_dir),
     }
 
@@ -76,6 +85,10 @@ def format_summary(summary: dict) -> str:
     lines.append("  - Top 20 global :")
     for item in summary["top_words"]:
         lines.append(f"      {item['word']}: {item['count']}")
+    if summary.get("languages"):
+        lines.append("  - Langues les plus détectées :")
+        for entry in summary["languages"][:10]:
+            lines.append(f"      {entry['lang']}: {entry['count']}")
     lines.append("  - Détail par worker :")
     for worker in summary["per_worker"]:
         lines.append(

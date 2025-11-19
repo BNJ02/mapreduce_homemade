@@ -307,6 +307,7 @@ def main() -> int:
             "unique_words": summary.get("unique_words"),
             "top_words": summary.get("top_words"),
             "per_worker": summary.get("per_worker"),
+            "languages": summary.get("languages"),
             "output_dir": summary.get("output_dir"),
         }
         append_benchmark_row(benchmark_file, row)

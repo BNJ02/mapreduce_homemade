@@ -22,6 +22,7 @@ toutes les machines listées (même chemin `remote-path`).
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import signal
 import time
@@ -239,6 +240,16 @@ def main() -> int:
             print(f"[launcher] Aucun résultat trouvé dans {remote_root}/output")
         else:
             print(format_summary(summary))
+            metrics = summary.get("master_metrics")
+            if metrics is not None:
+                metrics = dict(metrics)
+                metrics["languages"] = summary.get("languages") or []
+                metrics_path = output_dir / "master_metrics.json"
+                try:
+                    with metrics_path.open("w", encoding="utf-8") as fh:
+                        json.dump(metrics, fh, ensure_ascii=False, indent=2)
+                except OSError as exc:
+                    print(f"[launcher] Impossible de mettre à jour {metrics_path}: {exc}")
     except KeyboardInterrupt:
         print("[launcher] Interruption reçue, arrêt des processus...")
     finally:

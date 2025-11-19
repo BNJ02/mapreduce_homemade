@@ -90,6 +90,7 @@ class WorkerState:
     interval: Optional[Tuple[int, int]] = None
     min_freq: int = 0
     max_freq: int = 0
+    samples: List[int] = field(default_factory=list)
 
 
 workers: Dict[str, WorkerState] = {}
@@ -143,6 +144,9 @@ def handle_worker(conn: socket.socket, addr, expected_workers: int) -> None:
                         w.wordcount_done = True
                         w.min_freq = int(msg.get("min_freq", 0))
                         w.max_freq = int(msg.get("max_freq", 0))
+                        samples = msg.get("samples") or []
+                        if isinstance(samples, list):
+                            w.samples = [int(s) for s in samples if isinstance(s, int)]
                         print(f"Worker {wid} a terminé le wordcount.")
                     if workers and all(w.wordcount_done for w in workers.values()):
                         print("Tous les wordcounts sont terminés.")
@@ -249,15 +253,32 @@ def run_master(host: str, port: int, expected_workers: int, num_splits: int, fre
                     total_range = max_freq - min_freq + 1
                     if freq_step and freq_step > 0:
                         step = freq_step
-                    else:
-                        step = max(1, math.ceil(total_range / len(worker_ids)))
-                    current_min = min_freq
+                        current_min = min_freq
+                        for idx, wid in enumerate(worker_ids):
+                            high = current_min + step - 1
+                            if idx == len(worker_ids) - 1:
+                                high = max_freq
+                            workers[wid].interval = (current_min, high)
+                            current_min = high + 1
+                        return
+
+                    combined_samples: List[int] = []
+                    for w in workers.values():
+                        if w.samples:
+                            combined_samples.extend(w.samples)
+                    if not combined_samples:
+                        combined_samples = [min_freq, max_freq]
+                    combined_samples.sort()
+
+                    total_samples = len(combined_samples)
                     for idx, wid in enumerate(worker_ids):
-                        high = current_min + step - 1
+                        start_idx = int(total_samples * idx / len(worker_ids))
+                        end_idx = int(total_samples * (idx + 1) / len(worker_ids)) - 1
+                        start_val = combined_samples[start_idx] if start_idx < total_samples else min_freq
+                        end_val = combined_samples[end_idx] if end_idx < total_samples and end_idx >= 0 else max_freq
                         if idx == len(worker_ids) - 1:
-                            high = max_freq
-                        workers[wid].interval = (current_min, high)
-                        current_min = high + 1
+                            end_val = max_freq
+                        workers[wid].interval = (start_val, end_val)
 
             def notify_sort_phase() -> None:
                 with workers_lock:
