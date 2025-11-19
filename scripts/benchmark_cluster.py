@@ -230,6 +230,11 @@ def parse_args() -> argparse.Namespace:
         default="benchmarks/exports",
         help="Dossier local où rapatrier les fichiers output/ de chaque run",
     )
+    parser.add_argument(
+        "--fetch-output",
+        action="store_true",
+        help="Rapatrier les fichiers output/ après chaque run",
+    )
     return parser.parse_args()
 
 
@@ -313,14 +318,15 @@ def main() -> int:
         append_benchmark_row(benchmark_file, row)
         print(f"[benchmark] Résultats ajoutés à {benchmark_file}")
 
-        label = f"run_workers{workers}_splits{args.splits}"
-        exported_path = fetch_remote_output(
-            args.remote_host,
-            remote_output_dir,
-            export_root,
-            label,
-        )
-        print(f"[benchmark] Fichiers output rapatriés dans {exported_path}")
+        if args.fetch_output:
+            label = f"run_workers{workers}_splits{args.splits}"
+            exported_path = fetch_remote_output(
+                args.remote_host,
+                remote_output_dir,
+                export_root,
+                label,
+            )
+            print(f"[benchmark] Fichiers output rapatriés dans {exported_path}")
 
     close_master_connection(args.remote_host)
     return 0
