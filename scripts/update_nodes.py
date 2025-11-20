@@ -30,9 +30,9 @@ URL = "https://tp.telecom-paris.fr/ajax.php"
 PRIORITY_PREFIXES = (
     "tp-1d23",
     "tp-3a101",
-    "tp-1a226",
     "tp-3a107",
     "tp-3b01",
+    "tp-1a226",
 )
 
 
