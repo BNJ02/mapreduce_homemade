@@ -50,9 +50,9 @@ Le projet vise à concevoir un système de type MapReduce à partir de briques d
 
 Le travail se structure autour de trois axes principaux :
 \begin{itemize}[noitemsep]
-    \item la définition du protocole entre un master et un ensemble de workers ;
-    \item l'implémentation de deux jobs MapReduce complets (wordcount puis tri réparti) ;
-    \item la mise en place de scripts d'orchestration et de benchmarks permettant l'analyse de la loi d'Amdahl.
+    \item la définition du protocole entre un master et un ensemble de workers
+    \item l'implémentation de deux jobs MapReduce complets (wordcount puis tri réparti)
+    \item la mise en place de scripts d'orchestration et de benchmarks permettant l'analyse de la loi d'Amdahl
 \end{itemize}
 
 \section{Architecture et implémentation}
@@ -113,9 +113,9 @@ La logique de communication (\emph{handshake}, échanges de coordonnées de shuf
 
 Le premier job est un \emph{wordcount} enrichi, dont l'objectif est de :
 \begin{itemize}[noitemsep]
-    \item compter le nombre d'occurrences de chaque mot dans le corpus CommonCrawl ;
-    \item estimer la langue dominante des documents ou des segments de texte (\emph{langdetect}) ;
-    \item produire des statistiques de fréquences par langue.
+    \item compter le nombre d'occurrences de chaque mot dans le corpus CommonCrawl
+    \item estimer la langue dominante des documents ou des segments de texte (\emph{langdetect})
+    \item produire des statistiques de fréquences par langue
 \end{itemize}
 
 \paragraph{Phase Map.} Chaque worker lit les splits qui lui sont assignés, applique une tokenisation simple (nettoyage, mise en minuscules, filtrage) et émet des paires \((\text{mot}, 1)\). En parallèle, une détection de langue est effectuée (par exemple pour chaque document ou bloc de texte) et agrégée dans des compteurs de type \((\text{langue}, 1)\).
@@ -128,14 +128,14 @@ Le premier job est un \emph{wordcount} enrichi, dont l'objectif est de :
 
 Le second job prend comme entrée les résultats du wordcount et produit un tri global des mots :
 \begin{itemize}[noitemsep]
-    \item ordre principal : fréquence décroissante ;
-    \item ordre secondaire : ordre alphabétique pour les mots de même fréquence.
+    \item ordre principal : fréquence décroissante
+    \item ordre secondaire : ordre alphabétique pour les mots de même fréquence
 \end{itemize}
 
 \paragraph{Définition des intervalles de fréquence.} À partir des fichiers de wordcount, le master calcule des statistiques globales (min/max de fréquences, échantillons, quantiles) et définit des intervalles de fréquences associés à chaque worker. Par exemple :
 \begin{itemize}[noitemsep]
-    \item worker~1 : mots de fréquence $[1, 10]$ ;
-    \item worker~2 : mots de fréquence $[11, 100]$ ;
+    \item worker~1 : mots de fréquence $[1, 10]$
+    \item worker~2 : mots de fréquence $[11, 100]$
     \item etc.
 \end{itemize}
 Les mots très rares peuvent être répartis par hashing pour éviter le déséquilibre de charge.
@@ -225,18 +225,9 @@ La phase Map du job wordcount intègre une détection de la langue pour les segm
 
 On constate que les occurrences sont dominées très largement par l'anglais, puis par quelques autres langues majeures (russe, allemand, français, espagnol). Les autres langues se retrouvent dans une longue traîne de fréquences plus faibles. Cette distribution est cohérente avec la composition attendue d'un corpus web mondial, et valide le fait que les statistiques agrégées par le système capturent bien la structure multilingue des données.
 
-\section{Discussion et limites}
+\section{Les limites}
 
-Le système réalisé respecte les contraintes essentielles du cahier des charges et plus :
-\begin{itemize}[noitemsep]
-    \item communication TCP entre un master et des workers, avec un shuffle pair-à-pair
-    \item absence de transport des données applicatives par le master
-    \item deux jobs MapReduce complets (wordcount enrichi, tri réparti) sur un corpus de type CommonCrawl
-    \item prise en compte du multi\-cœurs côté workers (optionnel)
-    \item scripts d'automatisation pour le déploiement et l'expérimentation (optionnel)
-\end{itemize}
-
-Cependant, plusieurs limites sont à noter :
+Plusieurs limites sont à noter :
 \begin{itemize}[noitemsep]
     \item la robustesse face aux pannes de nœuds reste limitée (pas de réallocation automatique des splits)
     \item la politique de répartition par intervalles de fréquences peut encore être raffinée pour mieux équilibrer la charge
@@ -284,9 +275,131 @@ On observe un effet marqué de \og marches d'escalier \fg{} : dès que l'on atte
 
 Lorsque l'on atteint un multiple, la charge se répartit beaucoup plus uniformément, d'où le saut visible dans le speedup. Malgré ces effets de granularité, les taux de parallélisation estimés restent très élevés dans l'ensemble du spectre exploré, ce qui confirme la pertinence de l'architecture choisie pour exploiter massivement le parallélisme inter\- et intra\-nœuds.
 
+\section{Reproductabilité}
+
+Pour garantir la reproductabilité des expériences, plusieurs éléments sont nécessaires : l'installation de \texttt{uv} sur le réseau de machines TP, la mise à jour régulière de la liste de nœuds disponibles, et l'utilisation des scripts \texttt{benchmark\_cluster.py} et/ou \texttt{run\_cluster.py}.
+
+\subsection{Installation de \texorpdfstring{\texttt{uv}}{uv} sur le NFS}
+
+Il suffit d'installer \texttt{uv} une fois sur une machine du réseau TP dont le \texttt{\$HOME} est partagé via NFS. Par exemple :
+\begin{verbatim}
+curl -LsSf https://astral.sh/uv/install.sh | sh
+\end{verbatim}
+Par défaut, \texttt{uv} est alors disponible dans \texttt{\$HOME/.local/bin/uv}. Grâce au NFS, ce chemin est visible depuis toutes les machines de la salle (même chemin \texttt{/cal/exterieurs/blepourt-25/.local/bin/uv}).
+
+\subsection{Mise à jour de \texorpdfstring{\texttt{config/nodes.txt}}{config/nodes.txt}}
+
+Avant de lancer des expériences, il est recommandé de rafraîchir la liste des machines disponibles :
+\begin{verbatim}
+python3 scripts/update_nodes.py
+\end{verbatim}
+Ce script interroge l'API \texttt{https://tp.telecom-paris.fr/ajax.php}, récupère les machines marquées comme disponibles, les ordonne par groupes prioritaires (par exemple \texttt{tp-1d23}, \texttt{tp-1a226}, etc.) et écrit le résultat dans \texttt{config/nodes.txt}. Ce fichier est ensuite utilisé par \texttt{run\_cluster.py} et copié sur la machine distante par \texttt{benchmark\_cluster.py}.
+
+\subsection{Lancer des benchmarks depuis sa machine locale}
+
+Depuis une machine personnelle (connectée au réseau TP ou via VPN) et à la racine du dépôt, il est possible d'orchestrer des runs complets en utilisant \texttt{scripts/benchmark\_cluster.py}. Une commande typique est :
+\begin{verbatim}
+python3 scripts/benchmark_cluster.py \
+  --remote-host blepourt-25@tp-1a226-00 \
+  --remote-path /cal/exterieurs/blepourt-25/hadoop_homemade \
+  --remote-uv-bin /cal/exterieurs/blepourt-25/.local/bin/uv \
+  --splits 5 \
+  --worker-counts 1 2 5 \
+  --fetch-output
+\end{verbatim}
+où :
+\begin{itemize}[noitemsep]
+    \item \texttt{--remote-host} désigne la machine TP qui servira d'hôte de référence (ici \texttt{blepourt-25@tp-1a226-00})
+    \item \texttt{--remote-path} est le chemin du projet sur le NFS de cette machine (par ex. \texttt{~/hadoop\_homemade})
+    \item \texttt{--remote-uv-bin} pointe vers l'exécutable \texttt{uv} installé sur le NFS (par défaut \texttt{\$HOME/.local/bin/uv})
+    \item \texttt{--splits} fixe le nombre de splits à traiter (ici 5)
+    \item \texttt{--worker-counts} liste les nombres de workers à tester successivement (ici 1, 2 puis 5 workers)
+    \item \texttt{--fetch-output} : permet de récupérer en local les résultats produits
+\end{itemize}
+Autres options utiles de \texttt{benchmark\_cluster.py} :
+\begin{itemize}[noitemsep]
+    \item \texttt{--paths} : liste des fichiers/dossiers à copier via \texttt{scp} (par défaut \texttt{master.py}, \texttt{worker.py}, \texttt{config}, \texttt{scripts/run\_cluster.py}, \texttt{scripts/results\_summary.py})
+    \item \texttt{--nodes-file} : chemin distant vers \texttt{nodes.txt} utilisé par \texttt{run\_cluster.py} (par défaut \texttt{config/nodes.txt})
+    \item \texttt{--benchmark-file} : fichier local où append les résultats (\texttt{benchmarks/results.jsonl} par défaut)
+    \item \texttt{--export-dir} : dossier local où rapatrier les \texttt{output/} si souhaité (\texttt{benchmarks/exports} par défaut)
+\end{itemize}
+
+Le script se charge de copier les fichiers nécessaires (\texttt{master.py}, \texttt{worker.py}, \texttt{config}, \texttt{scripts/run\_cluster.py}, \texttt{scripts/results\_summary.py}) vers \texttt{remote-path}, de lancer \texttt{run\_cluster.py} à distance pour chaque configuration, puis d'agréger les résultats dans \texttt{benchmarks/results.jsonl}. Optionnellement, il peut aussi rapatrier les répertoires \texttt{output/}.
+
+Quand \texttt{--fetch-output} est utilisé, les résultats bruts (wordcount et tri) sont rapatriés en local sous \texttt{benchmarks/exports/}. Exemple :
+\begin{verbatim}
+benchmarks/
+  exports/
+    run_workers1_splits1/
+      master_metrics.json
+      tp-1d23-02_sorted.json
+      tp-1d23-02_wordcount.json
+  results.jsonl
+\end{verbatim}
+Chaque exécution de benchmark ajoute une ligne à \texttt{benchmarks/results.jsonl}. Le sous-dossier \texttt{exports} peut rapidement occuper de l'espace disque si l'on rapatrie de nombreux runs.
+
+En cas de crash de certains workers, il est possible de nettoyer les processus Python sur l'ensemble des machines listées dans \texttt{config/nodes.txt} grâce au script shell :
+\begin{verbatim}
+bash scripts/kill_python_all.sh
+\end{verbatim}
+Le master, lancé sur une machine en particulier, doit être terminé manuellement (par exemple via \texttt{htop} ou \texttt{kill -9}).
+
+\subsection{Lancer directement le cluster depuis une machine TP}
+
+Il est également possible de lancer directement le cluster à partir d'une machine TP (par exemple \texttt{tp-1a226-00}), sans passer par \texttt{benchmark\_cluster.py}. Une commande typique, exécutée depuis la racine du dépôt sur cette machine, est :
+\begin{verbatim}
+uv run python scripts/run_cluster.py \
+  --nodes-file config/nodes.txt \
+  --workers 1 \
+  --splits 1 \
+  --remote-path /cal/exterieurs/blepourt-25/hadoop_homemade \
+  --uv-bin /cal/exterieurs/blepourt-25/.local/bin/uv
+\end{verbatim}
+Les principaux arguments de \texttt{run\_cluster.py} sont :
+\begin{itemize}[noitemsep]
+    \item \texttt{--nodes-file} : fichier listant les machines disponibles (par défaut \texttt{config/nodes.txt})
+    \item \texttt{--master-node} : machine sur laquelle lancer le master (par défaut la première du fichier)
+    \item \texttt{--workers} : nombre de workers à lancer (si \texttt{--worker-nodes} n'est pas fourni)
+    \item \texttt{--splits} : nombre de splits à traiter
+    \item \texttt{--remote-path} : chemin du projet sur les machines distantes (partagé via NFS)
+    \item \texttt{--data-dir}, \texttt{--file-prefix}, \texttt{--file-suffix}, \texttt{--split-padding} : décrivent la localisation et le format des fichiers CommonCrawl
+    \item \texttt{--output-dir} : répertoire de sortie relatif à \texttt{remote-path} (par défaut \texttt{output})
+    \item \texttt{--uv-bin} : chemin vers l'exécutable \texttt{uv} utilisé pour lancer \texttt{master.py} et \texttt{worker.py}
+\end{itemize}
+
+Pour que ce script fonctionne, le NFS doit contenir au minimum la structure suivante (au même \texttt{remote-path} sur toutes les machines) :
+\begin{verbatim}
+config/nodes.txt
+master.py
+worker.py
+scripts/run_cluster.py
+scripts/results_summary.py
+\end{verbatim}
+
+Les résultats sont écrits dans le répertoire \texttt{output} sous \texttt{remote-path}. Par exemple :
+\begin{verbatim}
+output/
+  master_metrics.json
+  tp-1d23-02_sorted.json
+  tp-1d23-02_wordcount.json
+  workers5_splits5/
+    master_metrics.json
+    tp-1d23-02_sorted.json
+    tp-1d23-02_wordcount.json
+    tp-1d23-03_sorted.json
+    tp-1d23-03_wordcount.json
+    tp-1d23-04_sorted.json
+    tp-1d23-04_wordcount.json
+    tp-1d23-05_sorted.json
+    tp-1d23-05_wordcount.json
+    tp-1d23-06_sorted.json
+    tp-1d23-06_wordcount.json
+\end{verbatim}
+Ces fichiers contiennent les résultats détaillés du wordcount et du tri réparti pour chaque worker, ainsi que les métriques globales du master (\texttt{master\_metrics.json}) utilisées pour l'analyse de la loi d'Amdahl.
+
 \vfill
 \noindent\textbf{Auteur :} Benjamin Lepourtois -- Mastère Spécialisé Data, Télécom Paris (promotion 2026)\\
-\textbf{Matière :} Systèmes répartis\\
+\textbf{Matière :} Systèmes répartis - DATA701\\
 \textbf{Enseignant :} Rémi SHARROCK
 
 \end{document}
