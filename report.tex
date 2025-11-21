@@ -32,9 +32,9 @@ Enseignant : Rémi SHARROCK}
 \maketitle
 
 \begin{center}
-    \vspace{-0.5em}
+    \vspace{3em}
     \includegraphics[width=0.15\textwidth]{figures/Logo_Télécom_Paris.pdf}
-    \vspace{1em}
+    \vspace{5em}
 \end{center}
 
 \begin{abstract}
@@ -44,6 +44,12 @@ Enseignant : Rémi SHARROCK}
 \bigskip
 \noindent\textbf{Code source :} \url{https://github.com/BNJ02/mapreduce_homemade}
 
+\begin{newpage}
+    \tableofcontents
+\end{newpage}
+\newpage
+
+\newpage
 \section{Introduction}
 
 Le projet vise à concevoir un système de type MapReduce à partir de briques de base (sockets TCP, multi\-processus, scripts de déploiement), sans recourir à un framework existant. Ce système doit être déployable sur les machines de Télécom Paris, en respectant les contraintes d'infrastructure (NFS partagé, limite de connexions SSH, protocole TCP) et en permettant de réaliser une étude expérimentale de la loi d'Amdahl.
@@ -163,8 +169,9 @@ Les résultats bruts (\texttt{results.jsonl}) contiennent typiquement, pour chaq
     \item d'autres métriques comme le timestamp, le nombre de mots traités, le nombre de mots uniques, le top 20 des mots les plus fréquents, les langues détectées, etc.
 \end{itemize}
 
-Ces données sont ensuite exploitées dans des notebooks (non détaillés ici) pour visualiser les courbes de speedup, l'effet de la taille de données et la répartition des langues.
+Ces données sont ensuite exploitées dans des notebooks (non détaillés ici) pour visualiser les courbes de speedup, l'effet de la taille de données et la répartition des langues, présentés ci-après.
 
+\newpage
 \section{Expérimentation de la loi d'Amdahl}
 
 \subsection{Méthodologie}
@@ -225,6 +232,7 @@ La phase Map du job wordcount intègre une détection de la langue pour les segm
 
 On constate que les occurrences sont dominées très largement par l'anglais, puis par quelques autres langues majeures (russe, allemand, français, espagnol). Les autres langues se retrouvent dans une longue traîne de fréquences plus faibles. Cette distribution est cohérente avec la composition attendue d'un corpus web mondial, et valide le fait que les statistiques agrégées par le système capturent bien la structure multilingue des données.
 
+\newpage
 \section{Les limites}
 
 Plusieurs limites sont à noter :
@@ -246,6 +254,7 @@ Ce projet a permis de mettre en œuvre un système de type MapReduce sur une inf
 
 Les extensions possibles incluent la tolérance aux pannes, des algorithmes de partitionnement plus sophistiqués pour le tri réparti, et l'intégration d'autres types de jobs analytiques sur le corpus CommonCrawl.
 
+\newpage
 \section{Pour aller plus loin}
 
 Au-delà des expériences principales, la loi d'Amdahl a été étudiée sur des configurations plus fines, en faisant varier le nombre de splits indépendamment du nombre de workers. Dans ces expériences supplémentaires, le nombre de splits n'est plus nécessairement un multiple du nombre de workers, ce qui rompt la symétrie idéale où chaque worker reçoit exactement le même nombre de splits.
@@ -275,6 +284,7 @@ On observe un effet marqué de \og marches d'escalier \fg{} : dès que l'on atte
 
 Lorsque l'on atteint un multiple, la charge se répartit beaucoup plus uniformément, d'où le saut visible dans le speedup. Malgré ces effets de granularité, les taux de parallélisation estimés restent très élevés dans l'ensemble du spectre exploré, ce qui confirme la pertinence de l'architecture choisie pour exploiter massivement le parallélisme inter\- et intra\-nœuds.
 
+\newpage
 \section{Reproductabilité}
 
 Pour garantir la reproductabilité des expériences, plusieurs éléments sont nécessaires : l'installation de \texttt{uv} sur le réseau de machines TP, la mise à jour régulière de la liste de nœuds disponibles, et l'utilisation des scripts \texttt{benchmark\_cluster.py} et/ou \texttt{run\_cluster.py}.
@@ -404,10 +414,5 @@ output/
     tp-1d23-06_wordcount.json
 \end{verbatim}
 Ces fichiers contiennent les résultats détaillés du wordcount et du tri réparti pour chaque worker, ainsi que les métriques globales du master (\texttt{master\_metrics.json}) utilisées pour l'analyse de la loi d'Amdahl.
-
-\vfill
-\noindent\textbf{Auteur :} Benjamin Lepourtois -- Mastère Spécialisé Data, Télécom Paris (promotion 2026)\\
-\textbf{Matière :} Systèmes répartis - DATA701\\
-\textbf{Enseignant :} Rémi SHARROCK
 
 \end{document}
