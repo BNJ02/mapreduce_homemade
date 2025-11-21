@@ -41,6 +41,9 @@ Enseignant : Rémi SHARROCK}
     Ce rapport présente la conception et l'implémentation d'un système MapReduce ``fait maison'', développé dans le cadre du cours \emph{Systèmes répartis} à Télécom Paris. L'objectif est double : (i) réaliser un système distribué de type MapReduce s'appuyant sur des sockets TCP pour coordonner un master et plusieurs workers, et (ii) mettre en place une expérimentation de la loi d'Amdahl en faisant varier le nombre de nœuds et la taille des données, à partir d'un corpus de type CommonCrawl. Le système respecte les contraintes du cahier des charges (protocole, absence de transit des données applicatives par le master, déploiement sur les machines de l'école, scénarios d'évaluation) et implémente deux jobs MapReduce : un \emph{wordcount} enrichi de détection de langue, puis un tri réparti des mots par fréquence décroissante et ordre alphabétique. Les mesures obtenues sont agrégées dans un format exploitable pour l'analyse et la visualisation de la loi d'Amdahl.
 \end{abstract}
 
+\bigskip
+\noindent\textbf{Code source :} \url{https://github.com/BNJ02/mapreduce_homemade}
+
 \section{Introduction}
 
 Le projet vise à concevoir un système de type MapReduce à partir de briques de base (sockets TCP, multi\-processus, scripts de déploiement), sans recourir à un framework existant. Ce système doit être déployable sur les machines de Télécom Paris, en respectant les contraintes d'infrastructure (NFS partagé, limite de connexions SSH, protocole TCP) et en permettant de réaliser une étude expérimentale de la loi d'Amdahl.
