@@ -287,9 +287,17 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 \end{verbatim}
 Par défaut, \texttt{uv} est alors disponible dans \texttt{\$HOME/.local/bin/uv}. Grâce au NFS, ce chemin est visible depuis toutes les machines de la salle (même chemin \texttt{/cal/exterieurs/blepourt-25/.local/bin/uv}).
 
+Pour disposer d'un Python 3.14 (et exploiter le multi-cœurs via la pile uv), on peut demander à \texttt{uv} de l'installer, créer un environnement virtuel partagé via NFS, puis installer les dépendances du projet :
+\begin{verbatim}
+uv python install 3.14
+uv venv --python 3.14 ~/.venv
+uv pip install langdetect
+\end{verbatim}
+L'environnement \texttt{~/.venv} ainsi créé sera visible depuis toutes les machines partageant le même NFS et aura les mêmes dépendances installées.
+
 \subsection{Mise à jour de \texorpdfstring{\texttt{config/nodes.txt}}{config/nodes.txt}}
 
-Avant de lancer des expériences, il est recommandé de rafraîchir la liste des machines disponibles :
+Avant de lancer des expériences depuis sa machine locale, il est recommandé de rafraîchir la liste des machines disponibles depuis sa machine locale (connectée au réseau TP ou via VPN). Pour cela, on utilise le script :
 \begin{verbatim}
 python3 scripts/update_nodes.py
 \end{verbatim}
@@ -338,7 +346,7 @@ benchmarks/
 \end{verbatim}
 Chaque exécution de benchmark ajoute une ligne à \texttt{benchmarks/results.jsonl}. Le sous-dossier \texttt{exports} peut rapidement occuper de l'espace disque si l'on rapatrie de nombreux runs.
 
-En cas de crash de certains workers, il est possible de nettoyer les processus Python sur l'ensemble des machines listées dans \texttt{config/nodes.txt} grâce au script shell :
+En cas de crash de certains workers, il est possible de nettoyer les processus Python sur l'ensemble des machines listées dans \texttt{config/nodes.txt} grâce au script shell (à exécuter depuis sa machine locale) :
 \begin{verbatim}
 bash scripts/kill_python_all.sh
 \end{verbatim}
