@@ -35,6 +35,7 @@ running_event.set()
 
 
 def handle_stop(signum, frame):
+    """Interrompt proprement le master (SIGINT/SIGTERM)."""
     if running_event.is_set():
         print("Signal recu, arret propre du master...")
     running_event.clear()
@@ -45,6 +46,7 @@ signal.signal(signal.SIGTERM, handle_stop)
 
 
 def recv_all(conn: socket.socket, expected: int) -> bytes | None:
+    """Lit exactement expected octets sur une socket (None si fermeture/timeout)."""
     data = b""
     while len(data) < expected:
         try:
@@ -60,6 +62,7 @@ def recv_all(conn: socket.socket, expected: int) -> bytes | None:
 
 
 def recv_msg(conn: socket.socket) -> dict | None:
+    """Lit un message longueur + JSON, renvoie None si la connexion est close ou invalide."""
     header = recv_all(conn, 4)
     if header is None:
         return None
@@ -74,6 +77,7 @@ def recv_msg(conn: socket.socket) -> dict | None:
 
 
 def send_msg(conn: socket.socket, message: dict) -> None:
+    """Envoie un dict JSON préfixé par sa longueur."""
     payload = json.dumps(message).encode("utf-8")
     header = struct.pack(">I", len(payload))
     conn.sendall(header + payload)
@@ -102,6 +106,7 @@ job_start_time: float | None = None
 
 
 def handle_worker(conn: socket.socket, addr, expected_workers: int) -> None:
+    """Gère la session TCP avec un worker : enregistrement, notifications phase 1/2."""
     conn.settimeout(1.0)
     worker_id: str | None = None
     try:
@@ -177,6 +182,7 @@ def handle_worker(conn: socket.socket, addr, expected_workers: int) -> None:
 
 
 def distribute_splits(num_splits: int, worker_ids: List[str]) -> Dict[str, List[int]]:
+    """Attribue les splits en round-robin à la liste de workers fournie."""
     assignments: Dict[str, List[int]] = {wid: [] for wid in worker_ids}
     if not worker_ids or num_splits <= 0:
         return assignments
@@ -189,6 +195,7 @@ def distribute_splits(num_splits: int, worker_ids: List[str]) -> Dict[str, List[
 
 
 def run_master(host: str, port: int, expected_workers: int, num_splits: int, freq_step: int) -> None:
+    """Boucle principale du master : accepte les workers, distribue splits, orchestre phases 1/2."""
     print(
         f"Master en attente de {expected_workers} workers sur {host}:{port} "
         f"(nombre de splits = {num_splits})"
@@ -343,6 +350,7 @@ def run_master(host: str, port: int, expected_workers: int, num_splits: int, fre
 
 
 def parse_args() -> argparse.Namespace:
+    """Arguments CLI pour lancer le master MapReduce."""
     parser = argparse.ArgumentParser(description="Master MapReduce (serveur)")
     parser.add_argument("--host", default=HOST, help="Adresse d'ecoute (defaut: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=PORT, help="Port d'ecoute (defaut: 5374)")
@@ -373,6 +381,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def write_master_metrics(duration: float, workers: int, splits: int, output_dir: Path) -> None:
+    """Écrit les métriques globales du master dans output_dir/master_metrics.json."""
     output_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "duration_seconds": duration,

@@ -43,11 +43,13 @@ LOW_FREQ_THRESHOLD = 1000
 
 
 def deterministic_hash(key: str) -> int:
+    """Hash stable utilisé pour router une clé vers un worker cible."""
     digest = hashlib.sha256(key.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big", signed=False)
 
 
 def detect_language(text: str) -> str | None:
+    """Tente une détection de langue sur un extrait non vide."""
     snippet = text.strip()
     if len(snippet) < 50:
         return None
@@ -58,6 +60,7 @@ def detect_language(text: str) -> str | None:
 
 
 def sample_frequencies(counts: Dict[str, int], max_samples: int = 1000) -> List[int]:
+    """Échantillonne des fréquences pour estimer des quantiles sans tout transférer."""
     if not counts:
         return []
     freqs = sorted(counts.values())
@@ -68,6 +71,7 @@ def sample_frequencies(counts: Dict[str, int], max_samples: int = 1000) -> List[
 
 
 def recv_all(sock: socket.socket, expected: int) -> bytes:
+    """Lit exactement expected octets ou lève ConnectionError."""
     data = b""
     while len(data) < expected:
         chunk = sock.recv(expected - len(data))
@@ -80,6 +84,7 @@ def recv_all(sock: socket.socket, expected: int) -> bytes:
 
 
 def recv_msg(sock: socket.socket) -> dict | None:
+    """Lit un message longueur+payload JSON, None si connexion close/parse error."""
     try:
         header = recv_all(sock, 4)
     except ConnectionError:
@@ -96,12 +101,14 @@ def recv_msg(sock: socket.socket) -> dict | None:
 
 
 def send_msg(sock: socket.socket, message: dict) -> None:
+    """Envoie un dict JSON préfixé par la longueur."""
     payload = json.dumps(message).encode("utf-8")
     header = struct.pack(">I", len(payload))
     sock.sendall(header + payload)
 
 
 class ShuffleState:
+    """État partagé pour suivre le shuffle entrant : données agrégées + senders restants."""
     def __init__(self, expected_peers: List[str]) -> None:
         self.lock = threading.Lock()
         self.pending_senders = set(expected_peers)
@@ -121,6 +128,7 @@ class ShuffleState:
 
 
 def shuffle_listener(host: str, port: int, shuffle_state: ShuffleState) -> None:
+    """Serveur léger TCP pour recevoir les données de shuffle des autres workers."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((host, port))
@@ -144,6 +152,7 @@ def shuffle_listener(host: str, port: int, shuffle_state: ShuffleState) -> None:
 def handle_shuffle_connection(
     conn: socket.socket, addr, shuffle_state: ShuffleState
 ) -> None:
+    """Traite un flux SHUFFLE_DATA entrant et agrège les paires."""
     with conn:
         while not shuffle_state.done_event.is_set():
             msg = recv_msg(conn)
@@ -178,11 +187,13 @@ def build_split_path(
     file_suffix: str,
     split_padding: int,
 ) -> Path:
+    """Construit le chemin d'un split CommonCrawl (numéro zero-paddé)."""
     filename = f"{file_prefix}{split_id:0{split_padding}d}{file_suffix}"
     return Path(data_dir) / filename
 
 
 def count_words_in_lines(lines: List[str]) -> Dict[str, int]:
+    """Compte les occurrences dans un bloc de lignes (utilisé en multi-process)."""
     local_counts: Dict[str, int] = defaultdict(int)
     for line in lines:
         for match in WORD_RE.findall(line.lower()):
@@ -198,13 +209,7 @@ def wordcount_map_for_split(
     split_padding: int,
     process_pool: ProcessPoolExecutor,
 ) -> Tuple[Dict[str, int], Dict[str, int]]:
-    """
-    Lit un fichier CommonCrawl (format WET) et renvoie le wordcount du split.
-
-    Les fichiers sont nommes comme suit :
-    <file_prefix><numero zero-pad><file_suffix>
-    Exemple : CC-...-00000.warc.wet
-    """
+    """Lit un split CommonCrawl et renvoie (wordcount, lang_counts)."""
     counts: Dict[str, int] = defaultdict(int)
     lang_counts: Dict[str, int] = defaultdict(int)
     file_path = build_split_path(split_id, data_dir, file_prefix, file_suffix, split_padding)
@@ -249,6 +254,7 @@ def persist_wordcount_results(
     lang_counts: Dict[str, int],
     output_dir: str,
 ) -> Path:
+    """Sauvegarde les résultats du wordcount pour ce worker."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -280,6 +286,7 @@ def persist_sorted_results(
     sorted_items: List[Tuple[str, int]],
     output_dir: str,
 ) -> Path:
+    """Sauvegarde les résultats triés pour ce worker (intervalle assigné)."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     result = {
@@ -306,6 +313,7 @@ def run_map_shuffle_reduce(
     split_padding: int,
     map_threads: int,
 ) -> Tuple[Dict[str, int], Dict[str, int]]:
+    """Exécute Map -> Shuffle -> Reduce du job 1, renvoie (wordcounts, lang_counts)."""
     worker_ids = [w["worker_id"] for w in all_workers]
     num_workers = len(worker_ids)
     my_index = worker_ids.index(worker_id)
@@ -443,6 +451,7 @@ def run_sort_phase(
     shuffle_port: int,
     map_threads: int,
 ) -> List[Tuple[str, int]]:
+    """Phase 2 : repartition des wordcounts selon les intervalles et tri local."""
     worker_ids = [w["worker_id"] for w in all_workers]
     peers = [wid for wid in worker_ids if wid != worker_id]
     shuffle_state = ShuffleState(expected_peers=peers)
@@ -519,6 +528,7 @@ def run_sort_phase(
 
 
 def all_workers_done(state: Dict[str, int], nb_workers: int) -> bool:
+    """Vérifie si tous les workers attendus ont été comptabilisés."""
     return len(state) >= nb_workers
 
 
@@ -535,6 +545,7 @@ def run_worker(
     map_threads: int,
     output_dir: str,
 ) -> None:
+    """Boucle principale du worker : reçoit les ordres du master et enchaîne wordcount/tri."""
     with socket.create_connection((master_host, master_port)) as sock:
         send_msg(
             sock,

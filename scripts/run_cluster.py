@@ -39,6 +39,7 @@ from results_summary import format_summary, summarize_output_dir
 
 
 def read_nodes(file_path: Path) -> List[str]:
+    """Charge la liste de machines (une par ligne) depuis nodes.txt."""
     if not file_path.exists():
         raise FileNotFoundError(f"Fichier de nodes introuvable: {file_path}")
     nodes: List[str] = []
@@ -53,6 +54,7 @@ def read_nodes(file_path: Path) -> List[str]:
 
 
 def parse_args() -> argparse.Namespace:
+    """Arguments CLI pour lancer master + workers via SSH sur les machines TP."""
     parser = argparse.ArgumentParser(description="Lancer master + workers via SSH")
     parser.add_argument(
         "--nodes-file",
@@ -133,6 +135,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_ssh_command(host: str, remote_path: str, cmd: List[str]) -> List[str]:
+    """Construit une commande ssh qui se place dans remote_path avant d'exécuter cmd."""
     quoted_cmd = " ".join(shlex.quote(part) for part in cmd)
     if remote_path.startswith(("~/", "$")):
         cd_target = remote_path
@@ -143,11 +146,13 @@ def build_ssh_command(host: str, remote_path: str, cmd: List[str]) -> List[str]:
 
 
 def launch(cmd: List[str]) -> subprocess.Popen:
+    """Trace puis lance un sous-processus (ssh) sans attendre la fin."""
     print(" ".join(cmd))
     return subprocess.Popen(cmd)
 
 
 def main() -> int:
+    """Point d'entrée : choisit master/workers, lance les processus distants, résume les résultats."""
     args = parse_args()
     nodes = read_nodes(Path(args.nodes_file))
     remote_root = args.remote_path.rstrip("/")

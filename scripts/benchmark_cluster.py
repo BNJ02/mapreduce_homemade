@@ -24,6 +24,7 @@ CONTROL_PATH: Path | None = None
 
 
 def remote_join(remote_root: str, path: str) -> str:
+    """Concatène une racine distante et un chemin relatif en conservant les absolus."""
     rel = Path(path)
     if rel.is_absolute():
         return rel.as_posix()
@@ -31,6 +32,7 @@ def remote_join(remote_root: str, path: str) -> str:
 
 
 def configure_ssh_options(remote_host: str) -> None:
+    """Configure le multiplexage SSH pour limiter les connexions et accélérer les transferts."""
     global CONTROL_PATH
     safe_host = remote_host.replace("@", "_").replace(":", "_")
     CONTROL_PATH = Path.home() / f".ssh/benchmark-{safe_host}.sock"
@@ -54,6 +56,7 @@ def configure_ssh_options(remote_host: str) -> None:
 
 
 def close_master_connection(remote_host: str) -> None:
+    """Ferme proprement le ControlMaster SSH ouvert par configure_ssh_options."""
     if CONTROL_PATH is None:
         return
     try:
@@ -78,6 +81,7 @@ def run_cmd(
     retries: int = 0,
     retry_delay: float = 2.0,
 ) -> subprocess.CompletedProcess:
+    """Exécute une commande locale avec retries (optionnel) et capture (optionnel)."""
     attempts = retries + 1
     last_exc: subprocess.CalledProcessError | None = None
     for attempt in range(1, attempts + 1):
@@ -103,16 +107,19 @@ def run_cmd(
 
 
 def ssh_cmd(host: str, remote_path: str, command: str, capture: bool = False) -> subprocess.CompletedProcess:
+    """Exécute une commande bash dans un répertoire distant via SSH (avec retries)."""
     remote = f"cd {shlex.quote(remote_path)} && {command}"
     full_cmd = ["ssh", *SSH_BASE_OPTS, host, "bash", "-lc", remote]
     return run_cmd(full_cmd, capture=capture, retries=3)
 
 
 def use_shell(path: str) -> bool:
+    """Détermine si le chemin doit être interprété par un shell (tilde, variables, espaces)."""
     return any(ch in path for ch in ("$", "~")) or " " in path
 
 
 def ensure_remote_dir(remote_host: str, path: str) -> None:
+    """Crée un répertoire distant (en mode shell si nécessaire)."""
     if use_shell(path):
         run_cmd(
             ["ssh", *SSH_BASE_OPTS, remote_host, "bash", "-lc", f"mkdir -p {shlex.quote(path)}"],
@@ -123,6 +130,7 @@ def ensure_remote_dir(remote_host: str, path: str) -> None:
 
 
 def remove_remote_path(remote_host: str, path: str) -> None:
+    """Supprime un chemin distant avant copie pour éviter les restes de versions précédentes."""
     if use_shell(path):
         run_cmd(
             ["ssh", *SSH_BASE_OPTS, remote_host, "bash", "-lc", f"rm -rf {shlex.quote(path)}"],
@@ -133,6 +141,7 @@ def remove_remote_path(remote_host: str, path: str) -> None:
 
 
 def scp_paths(paths: Iterable[Path], base_dir: Path, remote_host: str, remote_path: str) -> None:
+    """Copie via SCP une liste de chemins en conservant leur arborescence relative."""
     for path in paths:
         rel = path.relative_to(base_dir)
         remote_parent = remote_path
@@ -147,6 +156,7 @@ def scp_paths(paths: Iterable[Path], base_dir: Path, remote_host: str, remote_pa
 
 
 def append_benchmark_row(file_path: Path, row: dict) -> None:
+    """Ajoute une ligne JSONL au fichier de benchmark (créé si absent)."""
     file_path.parent.mkdir(parents=True, exist_ok=True)
     with file_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -158,6 +168,7 @@ def fetch_remote_output(
     local_base: Path,
     label: str,
 ) -> Path:
+    """Rapatrie un répertoire output/ distant via rsync dans un dossier local labelisé."""
     destination = local_base / label
     if destination.exists():
         shutil.rmtree(destination)
@@ -176,6 +187,7 @@ def fetch_remote_output(
 
 
 def print_compact_log(stdout: str, stderr: str) -> None:
+    """Affiche les lignes utiles du log launcher + stderr résumé."""
     lines = []
     for line in stdout.splitlines():
         if "[launcher]" in line:
@@ -189,6 +201,7 @@ def print_compact_log(stdout: str, stderr: str) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Arguments CLI pour piloter des benchmarks à distance (copie + run_cluster)."""
     parser = argparse.ArgumentParser(description="Benchmark MapReduce sur cluster TP")
     parser.add_argument("--remote-host", required=True, help="Machine de référence (ex: blepourt-25@tp-1a226-10)")
     parser.add_argument(
@@ -239,6 +252,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Point d'entrée : copie les fichiers, lance les runs, agrège les résultats."""
     args = parse_args()
     configure_ssh_options(args.remote_host)
     repo_root = Path(__file__).resolve().parents[1]
