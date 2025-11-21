@@ -1,0 +1,289 @@
+\documentclass[a4paper,11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{graphicx}
+\usepackage{amsmath, amssymb}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue,
+  citecolor=black
+}
+
+\title{Système MapReduce ``fait maison'' et expérimentation de la loi d'Amdahl}
+\author{Benjamin Lepourtois\\
+Mastère Spécialisé Data -- Télécom Paris, promotion 2026}
+\date{Matière : Systèmes répartis - DATA701\\
+Enseignant : Rémi SHARROCK}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+    \vspace{-0.5em}
+    \includegraphics[width=0.15\textwidth]{figures/Logo_Télécom_Paris.pdf}
+    \vspace{1em}
+\end{center}
+
+\begin{abstract}
+    Ce rapport présente la conception et l'implémentation d'un système MapReduce ``fait maison'', développé dans le cadre du cours \emph{Systèmes répartis} à Télécom Paris. L'objectif est double : (i) réaliser un système distribué de type MapReduce s'appuyant sur des sockets TCP pour coordonner un master et plusieurs workers, et (ii) mettre en place une expérimentation de la loi d'Amdahl en faisant varier le nombre de nœuds et la taille des données, à partir d'un corpus de type CommonCrawl. Le système respecte les contraintes du cahier des charges (protocole, absence de transit des données applicatives par le master, déploiement sur les machines de l'école, scénarios d'évaluation) et implémente deux jobs MapReduce : un \emph{wordcount} enrichi de détection de langue, puis un tri réparti des mots par fréquence décroissante et ordre alphabétique. Les mesures obtenues sont agrégées dans un format exploitable pour l'analyse et la visualisation de la loi d'Amdahl.
+\end{abstract}
+
+\section{Introduction}
+
+Le projet vise à concevoir un système de type MapReduce à partir de briques de base (sockets TCP, multi\-processus, scripts de déploiement), sans recourir à un framework existant. Ce système doit être déployable sur les machines de Télécom Paris, en respectant les contraintes d'infrastructure (NFS partagé, limite de connexions SSH, protocole TCP) et en permettant de réaliser une étude expérimentale de la loi d'Amdahl.
+
+Le travail se structure autour de trois axes principaux :
+\begin{itemize}[noitemsep]
+    \item la définition du protocole entre un master et un ensemble de workers ;
+    \item l'implémentation de deux jobs MapReduce complets (wordcount puis tri réparti) ;
+    \item la mise en place de scripts d'orchestration et de benchmarks permettant l'analyse de la loi d'Amdahl.
+\end{itemize}
+
+\section{Architecture et implémentation}
+
+\subsection{Organisation du dépôt}
+
+L'organisation réelle du dépôt s'articule autour des fichiers et répertoires suivants :
+\begin{itemize}[noitemsep]
+    \item \texttt{master.py} : implémentation du master, orchestration des jobs, gestion des splits et coordination des workers.
+    \item \texttt{worker.py} : implémentation des workers, phases Map / Shuffle / Reduce, communication TCP.
+    \item \texttt{config/nodes.txt} : liste des nœuds utilisés pour les expériences.
+    \item \texttt{scripts/} :
+          \begin{itemize}[noitemsep]
+              \item \texttt{run\_cluster.py}, \texttt{update\_nodes.py} : remplissage/validation de \texttt{nodes.txt}, lancement des workers
+              \item \texttt{benchmark\_cluster.py} : exécution automatisée des expériences pour divers nombres de workers et tailles de données
+              \item \texttt{results\_summary.py} : agrégation des résultats dans un format exploitable.
+          \end{itemize}
+\end{itemize}
+
+\subsection{Rôle du master}
+
+Le master (\texttt{master.py}) remplit plusieurs fonctions :
+\begin{itemize}[noitemsep]
+    \item lecture de \texttt{config/nodes.txt} et construction de la liste des nœuds
+    \item découpe des données d'entrée en splits (fichiers ou intervalles de fichiers dans le NFS)
+    \item distribution des splits selon une politique \emph{round\-robin} à partir de deux nœuds
+    \item ouverture d'un serveur TCP écoutant les connexions des workers
+    \item envoi des paramètres de job (\emph{job type}, liste de splits, ports de shuffle, etc.) aux workers
+    \item suivi de l'avancement du job (accusés de réception, erreurs éventuelles) et collecte de métadonnées (durées de phases)
+\end{itemize}
+
+Le master ne transporte jamais les données applicatives (contenu des splits), ce qui respecte la contrainte du cahier des charges : les workers lisent directement les fichiers sur le NFS.
+
+\subsection{Rôle des workers}
+
+Chaque worker (\texttt{worker.py}) :
+\begin{itemize}[noitemsep]
+    \item se connecte au master via TCP et reçoit sa configuration (liste de splits à traiter, rôle dans la topologie)
+    \item exécute la phase Map en exploitant le multi\-cœurs (par exemple via \texttt{ProcessPoolExecutor}) pour paralléliser la lecture et le traitement des splits
+    \item effectue le shuffle pair-à-pair : pour chaque paire \((\text{clé}, \text{valeur})\), le worker calcule un hash de la clé qui détermine le worker destinataire et envoie les données directement via TCP
+    \item exécute la phase Reduce en agrégant les données reçues et en produisant un résultat local (fichier JSON ou équivalent)
+    \item enregistre des métriques (temps de Map, Shuffle, Reduce) et les communique au master ou les écrit dans \texttt{results.jsonl}
+\end{itemize}
+
+La logique de communication (\emph{handshake}, échanges de coordonnées de shuffle, formats de messages) est centralisée afin d'être réutilisable pour les deux jobs (wordcount et tri).
+
+\begin{figure}[h]
+    \centering
+    % Si le PDF est généré depuis le .tex, on peut inclure :
+    \includegraphics[width=\textwidth]{figures/mapreduce_pipeline.pdf}
+    \caption{Pipeline MapReduce : wordcount puis tri réparti des mots par fréquence.}
+    \label{fig:pipeline}
+\end{figure}
+
+\section{Jobs MapReduce implémentés}
+
+\subsection{Job 1 : Wordcount avec détection de langue}
+
+Le premier job est un \emph{wordcount} enrichi, dont l'objectif est de :
+\begin{itemize}[noitemsep]
+    \item compter le nombre d'occurrences de chaque mot dans le corpus CommonCrawl ;
+    \item estimer la langue dominante des documents ou des segments de texte (\emph{langdetect}) ;
+    \item produire des statistiques de fréquences par langue.
+\end{itemize}
+
+\paragraph{Phase Map.} Chaque worker lit les splits qui lui sont assignés, applique une tokenisation simple (nettoyage, mise en minuscules, filtrage) et émet des paires \((\text{mot}, 1)\). En parallèle, une détection de langue est effectuée (par exemple pour chaque document ou bloc de texte) et agrégée dans des compteurs de type \((\text{langue}, 1)\).
+
+\paragraph{Phase Shuffle.} Pour chaque mot, le worker calcule un hash de la clé et envoie les paires au worker propriétaire du bucket correspondant. Ce \emph{shuffle} pair\-à\-pair se fait via TCP, en respectant le fait que le master ne voit jamais les données applicatives.
+
+\paragraph{Phase Reduce.} Chaque worker agrège les paires reçues pour produire un \emph{wordcount} local (fichier \texttt{\_wordcount.json} contenant \((\text{mot}, \text{fréquence})\)), ainsi que des statistiques de langue. Les résultats sont stockés sur le NFS pour être réutilisés par le job 2 et pour l'analyse.
+
+\subsection{Job 2 : Tri réparti par fréquence puis ordre alphabétique}
+
+Le second job prend comme entrée les résultats du wordcount et produit un tri global des mots :
+\begin{itemize}[noitemsep]
+    \item ordre principal : fréquence décroissante ;
+    \item ordre secondaire : ordre alphabétique pour les mots de même fréquence.
+\end{itemize}
+
+\paragraph{Définition des intervalles de fréquence.} À partir des fichiers de wordcount, le master calcule des statistiques globales (min/max de fréquences, échantillons, quantiles) et définit des intervalles de fréquences associés à chaque worker. Par exemple :
+\begin{itemize}[noitemsep]
+    \item worker~1 : mots de fréquence $[1, 10]$ ;
+    \item worker~2 : mots de fréquence $[11, 100]$ ;
+    \item etc.
+\end{itemize}
+Les mots très rares peuvent être répartis par hashing pour éviter le déséquilibre de charge.
+
+\paragraph{Bucketisation (Map 2) et Shuffle 2.} Les workers lisent les fichiers de wordcount et affectent chaque mot à l'intervalle de fréquence approprié. Les paires \((\text{mot}, \text{fréquence})\) sont envoyées au worker propriétaire de l'intervalle, via un second \emph{shuffle} pair\-à\-pair.
+
+\paragraph{Reduce 2 et sortie globale.} Chaque worker trie localement les mots de son intervalle par fréquence décroissante, puis par ordre alphabétique. La concaténation des sorties ordonnées produit un tri global des mots du corpus. Ces sorties peuvent ensuite être utilisées pour générer des tableaux ou figures (par exemple top 50 des mots par langue).
+
+\section{Déploiement et scripts d'orchestration}
+
+L'automatisation des expériences repose sur plusieurs scripts Python dans \texttt{scripts/} :
+
+\begin{itemize}[noitemsep]
+    \item \texttt{update\_nodes.py} : récupération et mise à jour de la liste des machines dans \texttt{config/nodes.txt}, à partir de l'API fournie par l'école.
+    \item \texttt{run\_cluster.py} : lancement des workers sur les machines listées, en respectant la limite de 5 connexions SSH par minute depuis une même machine.
+    \item \texttt{benchmark\_cluster.py} : boucle d'expériences pour différentes combinaisons (nombre de workers, nombre de splits), lancées à distance depuis sa machine locale connectée au réseau de Télécom Paris.
+    \item \texttt{results\_summary.py} : agrégation des résultats dans \texttt{benchmarks/results.jsonl}.
+\end{itemize}
+
+Les résultats bruts (\texttt{results.jsonl}) contiennent typiquement, pour chaque run :
+\begin{itemize}[noitemsep]
+    \item le nombre de workers utilisés
+    \item le nombre de splits
+    \item les temps de Map, Shuffle, Reduce au total
+    \item d'autres métriques comme le timestamp, le nombre de mots traités, le nombre de mots uniques, le top 20 des mots les plus fréquents, les langues détectées, etc.
+\end{itemize}
+
+Ces données sont ensuite exploitées dans des notebooks (non détaillés ici) pour visualiser les courbes de speedup, l'effet de la taille de données et la répartition des langues.
+
+\section{Expérimentation de la loi d'Amdahl}
+
+\subsection{Méthodologie}
+
+La loi d'Amdahl exprime le speedup théorique $S(N)$ d'un programme en fonction du nombre de processeurs $N$ et de la fraction parallélisable $p$ :
+\[
+    S(N) = \frac{1}{(1-p) + \frac{p}{N}}.
+\]
+
+Dans le cadre de ce projet, la définition du \emph{speedup} est adaptée au protocole :
+\begin{itemize}[noitemsep]
+    \item la référence n'est pas nécessairement un run strictement séquentiel, mais peut être définie comme le cas où le nombre de workers est égal au nombre de splits
+    \item seules les phases Map + Shuffle + Reduce sont prises en compte dans les temps mesurés
+\end{itemize}
+
+Pour chaque taille de données, plusieurs campagnes sont réalisées en faisant varier le nombre de workers (par exemple $N \in \{1, 2, 4, 8, \dots\}$). Le speedup observé est alors :
+\[
+    S_{\text{obs}}(N) = \frac{T_{\text{ref}}}{T(N)},
+\]
+où $T_{\text{ref}}$ est le temps de référence et $T(N)$ le temps mesuré avec $N$ workers.
+
+\subsection{Résultats et estimation de $p$}
+
+À partir des mesures stockées dans \texttt{benchmarks/results.jsonl}, une régression est effectuée pour estimer la fraction parallélisable $p$ (et donc la fraction sérielle $1-p$). En pratique :
+\begin{itemize}[noitemsep]
+    \item on ajuste la courbe prévue par la loi d'Amdahl sur les points $(N, S_{\text{obs}}(N))$ ;
+    \item on compare les prédictions et les observations pour différents volumes de données.
+\end{itemize}
+
+La Figure~\ref{fig:amdahl-empirique} synthétise ce fit empirique : pour chaque configuration $(\text{workers}, \text{splits})$, on calcule le speedup observé et on le compare à la surface prédite par la loi d'Amdahl.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/amdahl_law_empirical_demo.png}
+    \caption{Speedup empirique en fonction du nombre de workers et des splits, et surface prédite par la loi d'Amdahl.}
+    \label{fig:amdahl-empirique}
+\end{figure}
+
+Les visualisations (et en particulier le notebook \texttt{amdahl\_splits60.ipynb}) montrent que la fraction parallélisable estimée est très élevée. Cela s'explique par plusieurs facteurs :
+\begin{itemize}[noitemsep]
+    \item la part de calcul pur (tokenisation, agrégation de clés, tri local) domine les coûts sériels et la coordination par le master reste relativement légère
+    \item le système exploite non seulement le parallélisme entre machines, mais aussi le parallélisme intra-nœud : chaque worker lance plusieurs processus de Map/Reduce en parallèle sur les c\oe urs locaux (jusqu'à 12 par machine). En combinant par exemple 60 workers avec 12 c\oe urs chacun, on atteint théoriquement jusqu'à $60 \times 12 = 720$ processus de traitement en parallèle
+    \item les entrées/sorties disque sont en grande partie masquées par le pipelining entre Map, Shuffle et Reduce, ce qui réduit encore la fraction sérielle effective
+\end{itemize}
+
+On observe néanmoins que, au-delà d'un certain nombre de workers, les coûts sériels (coordination, latence réseau, synchronisations, contention sur le NFS) finissent par dominer. À volume de données constant, la loi d'Amdahl rend bien compte de cette saturation : le fit de $p$ reste élevé, mais la courbe empirique tend vers une asymptote fixée par la fraction sérielle résiduelle.
+
+\section{Analyse des langues}
+
+La phase Map du job wordcount intègre une détection de la langue pour les segments de texte traités. Les résultats agrégés permettent de compter le nombre de tokens par langue.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.4\textwidth]{figures/languages_distribution.png}
+    \caption{Répartition des occurrences par langue dans le corpus CommonCrawl traité.}
+    \label{fig:lang-dist}
+\end{figure}
+
+On constate que les occurrences sont dominées très largement par l'anglais, puis par quelques autres langues majeures (russe, allemand, français, espagnol). Les autres langues se retrouvent dans une longue traîne de fréquences plus faibles. Cette distribution est cohérente avec la composition attendue d'un corpus web mondial, et valide le fait que les statistiques agrégées par le système capturent bien la structure multilingue des données.
+
+\section{Discussion et limites}
+
+Le système réalisé respecte les contraintes essentielles du cahier des charges et plus :
+\begin{itemize}[noitemsep]
+    \item communication TCP entre un master et des workers, avec un shuffle pair-à-pair
+    \item absence de transport des données applicatives par le master
+    \item deux jobs MapReduce complets (wordcount enrichi, tri réparti) sur un corpus de type CommonCrawl
+    \item prise en compte du multi\-cœurs côté workers (optionnel)
+    \item scripts d'automatisation pour le déploiement et l'expérimentation (optionnel)
+\end{itemize}
+
+Cependant, plusieurs limites sont à noter :
+\begin{itemize}[noitemsep]
+    \item la robustesse face aux pannes de nœuds reste limitée (pas de réallocation automatique des splits)
+    \item la politique de répartition par intervalles de fréquences peut encore être raffinée pour mieux équilibrer la charge
+    \item la collecte de métriques pourrait être enrichie (latences réseau détaillées, taille des buffers de shuffle, etc.) pour ensuite gagner du temps en prenant des décisions d'optimisation
+\end{itemize}
+
+\section{Conclusion}
+
+Ce projet a permis de mettre en œuvre un système de type MapReduce sur une infrastructure réelle, en respectant un cahier des charges proche de scénarios industriels tout en restant suffisamment simple pour être entièrement implémenté en Python. Le système :
+\begin{itemize}[noitemsep]
+    \item implémente un protocole TCP master--workers avec shuffle pair\-à\-pair
+    \item réalise deux jobs MapReduce, dont un tri réparti par fréquence et ordre alphabétique
+    \item exploite le multi\-cœurs et le NFS partagé des machines de Télécom Paris
+    \item fournit des benchmarks et des analyses conformes à la loi d'Amdahl, ainsi qu'une exploration de la répartition des langues dans le corpus
+\end{itemize}
+
+Les extensions possibles incluent la tolérance aux pannes, des algorithmes de partitionnement plus sophistiqués pour le tri réparti, et l'intégration d'autres types de jobs analytiques sur le corpus CommonCrawl.
+
+\section{Pour aller plus loin}
+
+Au-delà des expériences principales, la loi d'Amdahl a été étudiée sur des configurations plus fines, en faisant varier le nombre de splits indépendamment du nombre de workers. Dans ces expériences supplémentaires, le nombre de splits n'est plus nécessairement un multiple du nombre de workers, ce qui rompt la symétrie idéale où chaque worker reçoit exactement le même nombre de splits.
+
+La Figure~\ref{fig:amdahl-extended} présente un exemple de ces résultats étendus, et la Figure~\ref{fig:amdahl-extended-3d} propose une vue tridimensionnelle.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/amdahl_extended.png}
+    \caption{Speedup observé pour différents nombres de splits, y compris lorsque le nombre de splits n'est pas un multiple du nombre de workers.}
+    \label{fig:amdahl-extended}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/amdahl_extended_3d.png}
+    \caption{Visualisation 3D de la loi d'Amdahl : nombre de workers, nombre de splits (quantité de données) et speedup.}
+    \label{fig:amdahl-extended-3d}
+\end{figure}
+
+On observe un effet marqué de \og marches d'escalier \fg{} : dès que l'on atteint une configuration où le nombre de splits devient un multiple du nombre de workers, le speedup augmente brusquement d'un échelon. Ce phénomène est lié à la structure même du pipeline :
+\begin{itemize}[noitemsep]
+    \item le premier passage de Map sur les splits est la phase la plus coûteuse en temps, car chaque worker doit parcourir l'ensemble des splits qui lui sont attribués
+    \item l'attribution des splits par le master se fait en round\-robin, et dans notre expérience les splits sont atomiques : un split ne peut pas être subdivisé ni partagé entre deux workers
+    \item tant que la division des splits ne tombe pas pile sur un multiple du nombre de workers, certains workers se retrouvent avec un split supplémentaire à traiter, ce qui crée un déséquilibre de charge et limite le speedup global
+\end{itemize}
+
+Lorsque l'on atteint un multiple, la charge se répartit beaucoup plus uniformément, d'où le saut visible dans le speedup. Malgré ces effets de granularité, les taux de parallélisation estimés restent très élevés dans l'ensemble du spectre exploré, ce qui confirme la pertinence de l'architecture choisie pour exploiter massivement le parallélisme inter\- et intra\-nœuds.
+
+\vfill
+\noindent\textbf{Auteur :} Benjamin Lepourtois -- Mastère Spécialisé Data, Télécom Paris (promotion 2026)\\
+\textbf{Matière :} Systèmes répartis\\
+\textbf{Enseignant :} Rémi SHARROCK
+
+\end{document}
